@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+.npm
+.eslintcache
+
+# Project Diagnostics & Playground (Ignored as requested)
+backend/tests/playground/
+tmp/
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+.docker_id
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local agent/runtime files
+.codex
+*.Zone.Identifier
+*:Zone.Identifier
+
+# Large local data artifacts
+srsdb.dump
+srsdb_top10_all_tables.csv
+srsdb_top10_all_tables_by_table.xlsx
+top10_rows_all_tables.json
+
+# Local frontend build diagnostics
+frontend/build_error.log
+frontend/build_full.log
+frontend/tsc_errors.log

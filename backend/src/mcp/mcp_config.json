@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "unified-social-registry": {
+      "command": "python3",
+      "args": ["/home/pulkitv52/Advance-rag/backend/src/mcp/usr_server.py"]
+    }
+  }
+}
