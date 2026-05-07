@@ -81,6 +81,8 @@ interface UsrFraudFlag {
 
 interface UsrDataQuality {
   total_issues: number
+  total_citizens?: number
+  integrity_index?: number
   health: string
   checks: Record<string, number>
 }
@@ -113,6 +115,7 @@ interface UsrRulesEF {
 
 
 export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactNode }> = ({ API, navArea }) => {
+  const INTEL_PAGE_SIZE = 500
   const [usrStats, setUsrStats] = useState<UsrStats | null>(null)
   const [usrTopRisk, setUsrTopRisk] = useState<UsrCitizen[]>([])
   const [usrHeatmap, setUsrHeatmap] = useState<UsrDistrict[]>([])
@@ -120,6 +123,8 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
   const [usrGhosts, setUsrGhosts] = useState<UsrFraudFlag[]>([])
   const [usrDuplicates, setUsrDuplicates] = useState<UsrFraudFlag[]>([])
   const [usrIntelligenceFeed, setUsrIntelligenceFeed] = useState<any[]>([])
+  const [usrIntelligenceTotal, setUsrIntelligenceTotal] = useState(0)
+  const [usrLoadingMoreIntel, setUsrLoadingMoreIntel] = useState(false)
   const [usrAnomalies, setUsrAnomalies] = useState<UsrFraudFlag[]>([])
   const [usrDataQuality, setUsrDataQuality] = useState<UsrDataQuality | null>(null)
   const [usrAuditQueue, setUsrAuditQueue] = useState<UsrAuditCase[]>([])
@@ -140,6 +145,29 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
   const usrHasLoadedRef = useRef(false)
   const heatmapContainerRef = useRef<HTMLDivElement | null>(null)
   const [heatmapReady, setHeatmapReady] = useState(false)
+
+  const recategorizeFeed = (feed: any[]) => {
+    setUsrGhosts(
+      feed.filter((f: any) => {
+        const t = String(f?.type || '').toUpperCase()
+        return t.includes('GHOST')
+      })
+    )
+    setUsrDuplicates(
+      feed.filter((f: any) => {
+        const t = String(f?.type || '').toUpperCase()
+        const r = String(f?.rule || '').toUpperCase()
+        return t.includes('DUPLICATE') || t.includes('CLONE') || r.startsWith('B') || r.startsWith('I')
+      })
+    )
+    setUsrAnomalies(
+      feed.filter((f: any) => {
+        const t = String(f?.type || '').toUpperCase()
+        const r = String(f?.rule || '').toUpperCase()
+        return t.includes('ANOMALY') || t.includes('INTERNAL') || r.startsWith('C') || r.startsWith('F') || r.startsWith('H')
+      })
+    )
+  }
 
   const fetchUsrDashboard = async (force = false) => {
     if (usrRequestInFlightRef.current) return
@@ -168,7 +196,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
     }
 
     const [intelRes, qualityRes, auditRes, rulesEFRes] = await Promise.allSettled([
-      axios.get(`${API}/api/usr/intelligence/feed?limit=2000`),
+      axios.get(`${API}/api/usr/intelligence/feed?limit=${INTEL_PAGE_SIZE}&offset=0`),
       axios.get(`${API}/api/usr/data-quality`),
       axios.get(`${API}/api/usr/audit-queue`),
       axios.get(`${API}/api/usr/analytics/rules-ef`),
@@ -176,12 +204,9 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
 
     if (intelRes.status === 'fulfilled') {
       const feed = intelRes.value.data.feed || []
+      setUsrIntelligenceTotal(intelRes.value.data.total || feed.length)
       setUsrIntelligenceFeed(feed)
-      
-      // Auto-populate legacy categories for Audit Modal compatibility
-      setUsrGhosts(feed.filter((f: any) => f.type === 'GHOST'))
-      setUsrDuplicates(feed.filter((f: any) => f.type === 'DUPLICATE'))
-      setUsrAnomalies(feed.filter((f: any) => f.type === 'INTERNAL_ANOMALY' || f.type === 'ANOMALY'))
+      recategorizeFeed(feed)
     }
 
     if (qualityRes.status === 'fulfilled') {
@@ -199,6 +224,27 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
   useEffect(() => {
     fetchUsrDashboard()
   }, [])
+
+  const handleLoadMoreIntelligence = async () => {
+    if (usrLoadingMoreIntel) return
+    if (usrIntelligenceFeed.length >= usrIntelligenceTotal) return
+    setUsrLoadingMoreIntel(true)
+    try {
+      const res = await axios.get(
+        `${API}/api/usr/intelligence/feed?limit=${INTEL_PAGE_SIZE}&offset=${usrIntelligenceFeed.length}`
+      )
+      const more = res.data.feed || []
+      const total = res.data.total || usrIntelligenceTotal
+      const merged = [...usrIntelligenceFeed, ...more]
+      setUsrIntelligenceTotal(total)
+      setUsrIntelligenceFeed(merged)
+      recategorizeFeed(merged)
+    } catch (err) {
+      console.error('Failed to load more intelligence alerts', err)
+    } finally {
+      setUsrLoadingMoreIntel(false)
+    }
+  }
 
   useEffect(() => {
     const node = heatmapContainerRef.current
@@ -298,7 +344,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
   })
 
   const visibleCitizens = showAllCitizens ? filteredCitizens : filteredCitizens.slice(0, 10)
-  const intelligenceFeedCount = usrDuplicates.length + usrGhosts.length + usrAnomalies.length + usrRulesEF.rule_e.length + usrRulesEF.rule_f.length
+  const intelligenceFeedCount = usrIntelligenceFeed.length + usrRulesEF.rule_e.length + usrRulesEF.rule_f.length
 
   const handleAuditAll = () => {
     setIsQueueModalOpen(true)
@@ -520,8 +566,8 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
                {[
                  { 
                    label: 'Integrity Index', 
-                   value: usrDataQuality ? `${usrDataQuality.health === 'GOOD' ? '92%' : '78%'}` : '—', 
-                   sub: 'Overall Trust Score',
+                   value: typeof usrDataQuality?.integrity_index === 'number' ? `${usrDataQuality.integrity_index}%` : '—', 
+                   sub: usrDataQuality ? `${usrDataQuality.total_issues.toLocaleString()} issue signals` : 'Overall Trust Score',
                    icon: <ShieldCheck className="w-5 h-5 text-blue-600" />, 
                    bg: 'bg-blue-50/50',
                    color: 'text-blue-600',
@@ -538,8 +584,10 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
                  },
                  { 
                    label: 'Forensic Coverage', 
-                   value: usrStats?.coverage_pct ? `${usrStats.coverage_pct}%` : '46.0%', 
-                   sub: `${(usrStats?.total_citizens || 1027047).toLocaleString()} / 2.23M`,
+                   value: typeof usrStats?.coverage_pct === 'number' ? `${usrStats.coverage_pct}%` : '—',
+                   sub: usrStats
+                     ? `${(usrStats.total_citizens ?? 0).toLocaleString()} / ${(usrStats.registry_total ?? 2234522).toLocaleString()}`
+                     : 'Sync pending',
                    icon: <Ghost className="w-5 h-5 text-amber-600" />, 
                    bg: 'bg-amber-50/50',
                    color: 'text-amber-600',
@@ -599,7 +647,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
                    
                     <div ref={heatmapContainerRef} className="h-[300px] w-full min-w-0 relative overflow-hidden" style={{ minHeight: '300px' }}>
                       {heatmapReady && usrHeatmap.length > 0 ? (
-                      <ResponsiveContainer width="99%" height={300}>
+                      <ResponsiveContainer width="100%" height={300} minWidth={0} minHeight={260}>
                         <BarChart data={usrHeatmap.slice(0, 10)} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
                           <defs>
                             <linearGradient id="riskGrad" x1="0" y1="0" x2="0" y2="1">
@@ -833,10 +881,24 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
                     </ScrollArea>
                    
                    <div className="p-6 bg-slate-800 text-white flex items-center justify-between">
-                     <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Total Alerts: {usrDuplicates.length + usrGhosts.length + usrAnomalies.length}</span>
-                     <Button size="sm" onClick={handleAuditAll} className="h-8 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-4 rounded-xl">
-                       Audit All
-                     </Button>
+                     <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                       Showing {usrIntelligenceFeed.length.toLocaleString()} of {usrIntelligenceTotal.toLocaleString()} alerts
+                     </span>
+                     <div className="flex items-center gap-2">
+                       {usrIntelligenceFeed.length < usrIntelligenceTotal && (
+                         <Button
+                           size="sm"
+                           onClick={handleLoadMoreIntelligence}
+                           disabled={usrLoadingMoreIntel}
+                           className="h-8 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase px-4 rounded-xl"
+                         >
+                           {usrLoadingMoreIntel ? 'Loading...' : 'Load More'}
+                         </Button>
+                       )}
+                       <Button size="sm" onClick={handleAuditAll} className="h-8 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-4 rounded-xl">
+                         Audit All
+                       </Button>
+                     </div>
                    </div>
                 </Card>
 
@@ -886,7 +948,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
 
       {/* MODAL: Full Priority Queue */}
       <Dialog open={isQueueModalOpen} onOpenChange={setIsQueueModalOpen}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col p-8">
+        <DialogContent className="max-w-4xl max-h-[80vh] min-h-0 overflow-hidden flex flex-col p-8">
           <DialogHeader>
             <DialogTitle className="text-2xl font-black text-slate-800 uppercase tracking-tight">Priority Audit Queue</DialogTitle>
             <DialogDescription className="text-slate-500 font-medium">
@@ -894,8 +956,8 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
             </DialogDescription>
           </DialogHeader>
           
-          <ScrollArea className="flex-1 mt-6 pr-4">
-            <div className="space-y-3">
+          <div className="flex-1 min-h-0 mt-6 pr-2 overflow-y-auto">
+            <div className="space-y-3 pr-2">
               {usrAuditQueue.map((item: UsrAuditCase, idx: number) => (
                 <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-blue-200 transition-all group">
                   <div className="flex gap-4 items-center">
@@ -924,7 +986,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
                 </div>
               ))}
             </div>
-          </ScrollArea>
+          </div>
 
           <div className="mt-8 flex justify-end gap-3 pt-6 border-t border-slate-100">
              <Button variant="outline" onClick={() => setIsQueueModalOpen(false)} className="rounded-xl border-slate-200 text-slate-600 font-bold text-[10px] uppercase">Close</Button>

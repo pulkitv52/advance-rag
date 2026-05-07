@@ -56,7 +56,7 @@ async def index_usr_for_research(limit: int = 5000):
     try:
         # Fetch high risk citizens first
         query = """
-            SELECT * FROM public.swasthya_sathi_beneficiary 
+            SELECT * FROM srsadmin.swasthya_sathi_beneficiary 
             WHERE uid IS NOT NULL
             ORDER BY uid
             LIMIT $1

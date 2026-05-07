@@ -75,14 +75,30 @@ async def get_combined_graph(
             )
             check_record = await check_result.single()
 
-            if not check_record or check_record["cnt"] == 0:
+            # The Knowledge Map should default to the USR intelligence graph
+            # unless the caller explicitly scopes the request to documents.
+            # This prevents stray text in the research query box from
+            # unintentionally switching the map into an empty document-graph view.
+            force_usr_view = not document_ids
+
+            if force_usr_view or not check_record or check_record["cnt"] == 0:
                 logger.info("Knowledge Graph: formatting USR Fraud Intelligence Graph.")
                 # Storytelling Graph: Fraudulent Citizens + Contextual Clean Citizens
                 query = """
-                MATCH (c:Citizen)-[:RESIDES_IN]->(gp:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
-                WITH c, gp, b, d
-                ORDER BY (CASE WHEN (c.is_ghost_flag = true OR c.is_dup_flag = true OR c.is_anomaly_flag = true OR c.risk_tier IN ['HIGH', 'CRITICAL']) THEN 1 ELSE 0 END) DESC, 
-                         c.vulnerability_score DESC
+                MATCH (c:Citizen)
+                OPTIONAL MATCH (c)-[:RESIDES_IN]->(gp:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
+                WITH c, gp, b, d,
+                     CASE
+                        WHEN (
+                            c.is_ghost_flag = true
+                            OR c.is_dup_flag = true
+                            OR c.is_anomaly_flag = true
+                            OR c.risk_tier IN ['HIGH', 'CRITICAL']
+                            OR EXISTS { (c)-[:FLAGGED_AS]->(:FraudFlag) }
+                        )
+                        THEN 1 ELSE 0
+                     END AS priority_score
+                ORDER BY priority_score DESC, coalesce(c.vulnerability_score, 0) DESC
                 LIMIT 400
 
                 OPTIONAL MATCH (c)-[enroll:ENROLLED_IN]->(s:Scheme)
@@ -159,9 +175,11 @@ async def get_combined_graph(
                         gp.get("code") if gp else None, gp.get("name", "GP") if gp else "", "GP"
                     )
 
-                    # Citizen node (Correct typing for fraud)
+                    # Citizen node (mark red if risk-tier or explicitly fraud-flagged)
                     c_type = (
-                        "FraudFlag" if c.get("risk_tier") in ["HIGH", "CRITICAL"] else "Citizen"
+                        "FraudFlag"
+                        if (c.get("risk_tier") in ["HIGH", "CRITICAL"] or rec.get("f"))
+                        else "Citizen"
                     )
                     add_node(
                         c["uid"],
@@ -171,11 +189,11 @@ async def get_combined_graph(
                     )
 
                     # Geographic links
-                    if d and b:
+                    if d and b and d.get("code") and b.get("code"):
                         add_link(b["code"], d["code"], "PART_OF")
-                    if b and gp:
+                    if b and gp and b.get("code") and gp.get("code"):
                         add_link(gp["code"], b["code"], "PART_OF")
-                    if gp and c:
+                    if gp and c and gp.get("code") and c.get("uid"):
                         add_link(c["uid"], gp["code"], "RESIDES_IN")
 
                     # 2. Scheme Enrollment

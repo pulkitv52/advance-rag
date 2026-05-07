@@ -182,7 +182,7 @@ async def sync_citizens_to_graph(limit: Optional[int] = None, batch_size: int = 
 
     try:
         # ── 1. Count total records ─────────────────────────────────────────
-        count_query = "SELECT count(*) FROM public.swasthya_sathi_beneficiary WHERE uid IS NOT NULL"
+        count_query = "SELECT count(*) FROM srsadmin.swasthya_sathi_beneficiary WHERE uid IS NOT NULL"
         total_in_db = await conn.fetchval(count_query)
         cap = min(limit, total_in_db) if limit else total_in_db
         logger.info(
@@ -200,7 +200,7 @@ async def sync_citizens_to_graph(limit: Optional[int] = None, batch_size: int = 
             scheme_id,        ration_card_memberid,
             tran_count_1,     tran_count_2,
             entry_ts
-        FROM public.swasthya_sathi_beneficiary
+        FROM srsadmin.swasthya_sathi_beneficiary
         WHERE uid IS NOT NULL
         ORDER BY uid
         LIMIT $1 OFFSET $2

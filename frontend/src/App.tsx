@@ -61,7 +61,7 @@ const DynamicChart = ({ config }: { config: any }) => {
   return (
     <div data-viz-container className="my-10 h-[350px] w-full bg-white p-6 rounded-3xl border border-slate-100 shadow-sm transition-all hover:shadow-md animate-in fade-in duration-700">
       <h4 className="text-[10px] font-bold uppercase tracking-[0.3em] text-slate-300 mb-6 px-2">{options.title || 'Data Analytics'}</h4>
-      <ResponsiveContainer width="100%" height="85%">
+      <ResponsiveContainer width="100%" height={280} minWidth={0} minHeight={240}>
         {type === 'bar' ? (
           <BarChart data={data}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
@@ -108,6 +108,7 @@ import { Separator } from "./components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
 import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
+import { EligibilityStudio } from "./components/EligibilityStudio"
 import { UsrDashboard } from "./components/UsrDashboard"
 
 
@@ -182,7 +183,7 @@ const ENTITY_COLORS: Record<string, string> = {
   'District': '#6366f1',     // Indigo (Hierarchy Root)
   'Block': '#0ea5e9',        // Sky Blue (Sub-area)
   'GP': '#14b8a6',           // Teal (Local Governance)
-  'Citizen': '#eab308',      // Yellow (Beneficiary)
+  'Citizen': '#000000',      // Black (Beneficiary)
   'Scheme': '#a855f7',       // Purple (Benefit)
   'FraudFlag': '#ef4444',    // Red (Alert!)
   'Mobile': '#f97316',       // Orange (Identity Hub)
@@ -191,15 +192,32 @@ const ENTITY_COLORS: Record<string, string> = {
   'Address': '#64748b',      // Slate (Location Hub)
   'Person': '#0f172a',       // Deep Navy
   'Organization': '#3b82f6', // Bright Blue 
+  'Document': '#334155',     // Dark Slate
+  'Event': '#db2777',        // Rose
+  'Concept': '#8b5cf6',      // Violet
   'Location': '#10b981',     // Emerald
   'Default': '#94a3b8'       // Slate
 }
+
+// Keep map legend focused on labels that exist in the current USR graph model.
+const DATABASE_ENTITY_LEGEND: string[] = [
+  'District',
+  'Block',
+  'GP',
+  'Citizen',
+  'Scheme',
+  'FraudFlag',
+  'Mobile',
+  'RationCard',
+  'Operator',
+  'Address',
+]
 
 const ENTITY_TYPE_ALIASES: Record<string, string> = {
   'org': 'Organization', 'company': 'Organization', 'agency': 'Organization', 'institution': 'Organization', 'body': 'Organization', 'department': 'Organization', 'ministry': 'Organization',
   'place': 'Location', 'city': 'Location', 'country': 'Location', 'region': 'Location', 'state': 'Location', 'district': 'Location', 'office': 'Location',
   'officer': 'Person', 'individual': 'Person', 'user': 'Person', 'human': 'Person', 'member': 'Person', 'staff': 'Person', 'pensioner': 'Person',
-  'date': 'Event', 'milestone': 'Event', 'deadline': 'Event', 'meeting': 'Event', 'scheme': 'Concept',
+  'date': 'Event', 'milestone': 'Event', 'deadline': 'Event', 'meeting': 'Event', 'scheme': 'Scheme',
   'file': 'Document', 'report': 'Document', 'paper': 'Document', 'source': 'Document', 'circular': 'Document', 'order': 'Document'
 }
 
@@ -215,6 +233,11 @@ const resolveEntityCategory = (type: string = '', label: string = '') => {
 
   const aliasTarget = ENTITY_TYPE_ALIASES[t];
   if (aliasTarget) return aliasTarget;
+
+  if (t === 'concept') {
+    if (/(scheme|program|programme|policy|initiative|service)/.test(l)) return 'Scheme';
+    return 'Concept';
+  }
 
   if (/(person|officer|individual|pensioner|analyst|consultant|manager|doctor|engineer|employee|official)/.test(t)) return 'Person';
   if (/(citizen|beneficiary|applicant)/.test(t)) return 'Citizen';
@@ -234,6 +257,9 @@ const resolveEntityCategory = (type: string = '', label: string = '') => {
   if (/(government|govt|dept|department|ministry|samiti|board|authority|org|asso|corp|corporation|university|public health)/.test(l)) return 'Organization';
   if (l.includes('district')) return 'District';
   if (l.includes('block')) return 'Block';
+  if (/(scheme|program|programme|policy|initiative|service|framework|solution)/.test(l)) return 'Scheme';
+  if (/(fraud|flag|anomaly|duplicate|overload|corruption)/.test(l)) return 'FraudFlag';
+  if (/(gp|gram panchayat|gram_panchayat)/.test(l)) return 'GP';
 
   return 'Default';
 }
@@ -502,10 +528,6 @@ export default function App() {
 
   const handleQuery = async () => {
     if (!query.trim()) return
-    if (!selectedProjectId) {
-      setError('Select a project before running research.')
-      return
-    }
     setQuerying(true)
     setResult(null)
     setError(null)
@@ -526,15 +548,11 @@ export default function App() {
   }
 
   const fetchGraph = async () => {
-    if (!selectedProjectId) {
-      setGraphData({ nodes: [], links: [] })
-      return
-    }
-
     if (graphRequestInFlightRef.current) return
 
     graphRequestInFlightRef.current = true
     setLoadingGraph(true)
+    setError(null)
     try {
       const params = new URLSearchParams()
       if (selectedIds.size > 0) {
@@ -548,7 +566,18 @@ export default function App() {
       }
 
       const queryString = params.toString()
-      const res = await axios.get(`${API}/documents/graph/all${queryString ? `?${queryString}` : ''}`)
+      let res = await axios.get(`${API}/documents/graph/all${queryString ? `?${queryString}` : ''}`)
+
+      // If project-scoped graph is empty, retry unscoped so USR/global graph still appears.
+      if ((res.data?.nodes || []).length === 0 && selectedProjectId && selectedIds.size === 0) {
+        const fallbackParams = new URLSearchParams()
+        if (query.trim()) {
+          fallbackParams.set('q', query.trim())
+        }
+        const fallbackQuery = fallbackParams.toString()
+        res = await axios.get(`${API}/documents/graph/all${fallbackQuery ? `?${fallbackQuery}` : ''}`)
+      }
+
       const normalizedNodes = (res.data?.nodes || []).map((node: any) => ({
         ...node,
         type: resolveEntityCategory(node?.type || '', node?.label || node?.id || '')
@@ -557,8 +586,9 @@ export default function App() {
         nodes: normalizedNodes,
         links: res.data?.links || []
       })
-    } catch (err) {
-      setError("Failed to load graph data.")
+    } catch (err: any) {
+      const backendDetail = err?.response?.data?.detail
+      setError(backendDetail || "Failed to load graph data. Ensure backend and Neo4j are running.")
     } finally {
       graphRequestInFlightRef.current = false
       setLoadingGraph(false)
@@ -759,7 +789,7 @@ export default function App() {
               <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Workspace Scope</p>
                 <p className="mt-2 text-[11px] font-medium leading-relaxed text-slate-600">
-                  {selectedProjectId ? 'Only documents linked to the active project are visible here. New uploads are attached to this project automatically.' : 'Select or create a project to unlock documents, graph intelligence, uploads, and research for that workspace.'}
+                  {selectedProjectId ? 'Only documents linked to the active project are visible here. New uploads are attached to this project automatically.' : 'Select or create a project for scoped documents and research. Knowledge Map can still load globally.'}
                 </p>
               </div>
             </div>
@@ -899,6 +929,7 @@ export default function App() {
                 <TabsList className="bg-white/80 backdrop-blur-md border border-slate-200 p-1 rounded-xl h-10 w-fit shadow-sm">
                   <TabsTrigger value="research" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Research Chat</TabsTrigger>
                   <TabsTrigger value="map" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Knowledge Map</TabsTrigger>
+                  <TabsTrigger value="eligibility" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Eligibility</TabsTrigger>
                   <TabsTrigger value="registry" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">🏛 Social Registry</TabsTrigger>
                 </TabsList>
               </div>
@@ -911,11 +942,16 @@ export default function App() {
                       <TabsList className="bg-slate-100/50 border border-slate-200 p-1 rounded-xl h-10 w-fit">
                         <TabsTrigger value="research" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Research Chat</TabsTrigger>
                         <TabsTrigger value="map" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Knowledge Map</TabsTrigger>
+                        <TabsTrigger value="eligibility" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Eligibility</TabsTrigger>
                         <TabsTrigger value="registry" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Social Registry</TabsTrigger>
                       </TabsList>
                     }
                   />
                 )}
+              </TabsContent>
+
+              <TabsContent value="eligibility" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex">
+                <EligibilityStudio API={API} />
               </TabsContent>
 
               <TabsContent value="research" className="flex-1 flex flex-col overflow-hidden min-h-0 mt-0 m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex">
@@ -1101,8 +1137,8 @@ export default function App() {
                   <div ref={mapContainerRef} className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing">
                     <ForceGraph2D
                       graphData={graphData}
-                      width={mapDimensions.width}
-                      height={mapDimensions.height}
+                      width={Math.max(mapDimensions.width, 900)}
+                      height={Math.max(mapDimensions.height, 620)}
                       nodeLabel={(node: any) => `${node.type}: ${node.label}`}
                       linkLabel={(link: any) => `${link.label}: ${link.description || ''}`}
                       nodeColor={(node: any) => resolveEntityColor(node.type || 'Default', node.label)}
@@ -1144,6 +1180,23 @@ export default function App() {
                       cooldownTicks={100}
                     />
 
+                    {graphData.nodes.length === 0 && (
+                      <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+                        <div className="pointer-events-auto max-w-lg rounded-3xl border border-slate-200 bg-white/95 p-8 shadow-2xl text-center">
+                          <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Knowledge Map</p>
+                          <h3 className="mt-2 text-lg font-bold text-slate-900">No graph nodes available yet</h3>
+                          <p className="mt-2 text-sm text-slate-600">
+                            This usually means the selected project has no linked documents or graph sync has not populated Neo4j yet.
+                          </p>
+                          <div className="mt-5 flex justify-center gap-2">
+                            <Button variant="secondary" size="sm" className="rounded-xl" onClick={() => fetchGraph()}>
+                              Retry Load
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Immersive Map Controls Overlay */}
                     <div className="absolute top-8 right-8 flex flex-col gap-2 z-10">
                       <Button variant="secondary" size="icon" className="bg-white/90 backdrop-blur shadow-2xl rounded-xl border-slate-100 h-10 w-10 hover:bg-white" onClick={() => fetchGraph()}>
@@ -1154,10 +1207,10 @@ export default function App() {
                     <div className="absolute bottom-10 right-10 bg-white/90 backdrop-blur border border-slate-100 rounded-[32px] p-10 shadow-[0px_30px_90px_rgba(0,0,0,0.12)] space-y-4 animate-in slide-in-from-bottom-8 duration-1000 z-10 w-80">
                       <h4 className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-400 mb-8 border-b border-slate-50 pb-4">Intelligence Legend</h4>
                       <div className="grid grid-cols-2 gap-x-6 gap-y-5">
-                        {Object.entries(ENTITY_COLORS).map(([type, color]) => (
+                        {DATABASE_ENTITY_LEGEND.map((type) => (
                           <div key={type} className="flex items-center gap-4">
-                            <div className="w-4 h-4 rounded-full shadow-inner ring-4 ring-white" style={{ backgroundColor: color }} />
-                            <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter whitespace-nowrap">{type === 'Default' ? 'Uncategorized' : type}</span>
+                            <div className="w-4 h-4 rounded-full shadow-inner ring-4 ring-white" style={{ backgroundColor: ENTITY_COLORS[type] }} />
+                            <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter whitespace-nowrap">{type}</span>
                           </div>
                         ))}
                       </div>
@@ -1167,15 +1220,15 @@ export default function App() {
                         <div className="flex flex-col gap-4 text-[11px] text-slate-500">
                           <div className="flex gap-3 items-start">
                             <span className="font-black text-rose-500 shrink-0 w-14 uppercase tracking-tighter">Fraud 1</span>
-                            <span className="leading-snug"><strong className="text-slate-800">Ghost Beneficiaries:</strong> Synthetic or fake IDs claiming impossible data (e.g., Age 108) or sharing identical demographics.</span>
+                            <span className="leading-snug"><strong className="text-slate-800">Ghost Flags:</strong> Invalid or suspicious beneficiary profiles flagged from citizen attributes.</span>
                           </div>
                           <div className="flex gap-3 items-start">
                             <span className="font-black text-amber-500 shrink-0 w-14 uppercase tracking-tighter">Fraud 2</span>
-                            <span className="leading-snug"><strong className="text-slate-800">Identity Duplicates:</strong> One individual creating multiple fuzzy-matched profiles across platforms to double-dip in funds.</span>
+                            <span className="leading-snug"><strong className="text-slate-800">Identity Duplicates:</strong> Same person linked via duplicate identity patterns (B/I rules).</span>
                           </div>
                           <div className="flex gap-3 items-start">
                             <span className="font-black text-violet-500 shrink-0 w-14 uppercase tracking-tighter">Fraud 3</span>
-                            <span className="leading-snug"><strong className="text-slate-800">Systemic Corruption:</strong> Entire regions showing impossible anomalies (e.g., 300% village capacity) bridged to specific schemes.</span>
+                            <span className="leading-snug"><strong className="text-slate-800">Systemic Anomalies:</strong> Operator/household/scheme-level risk clusters requiring field audit.</span>
                           </div>
                         </div>
                       </div>

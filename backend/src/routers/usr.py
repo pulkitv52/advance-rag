@@ -56,7 +56,43 @@ async def get_summary_stats():
     """)
 
     if not stats:
-        return {"error": "Stats not yet initialized. Run graph batch sync."}
+        logger.info("USR stats cache missing. Falling back to live Citizen aggregates.")
+        live_data = await run_neo4j_query("""
+            MATCH (c:Citizen)
+            RETURN
+                count(c) AS total_citizens,
+                round(coalesce(avg(c.vulnerability_score), 0) * 100) / 100 AS avg_vulnerability,
+                count(CASE WHEN c.risk_tier = 'CRITICAL' OR coalesce(c.vulnerability_score, 0) >= 80 THEN 1 END) AS critical_count,
+                count(CASE WHEN c.risk_tier IN ['HIGH', 'CRITICAL'] OR coalesce(c.vulnerability_score, 0) >= 60 THEN 1 END) AS high_risk_count,
+                count(CASE WHEN toLower(coalesce(c.gender, '')) = 'female' THEN 1 END) AS female_count,
+                count(CASE WHEN c.risk_tier = 'CRITICAL' THEN 1 END) AS critical_tier_count
+        """)
+        if live_data:
+            current = live_data[0]
+            registry_total = 2234522
+            coverage = (current["total_citizens"] / registry_total) * 100 if registry_total else 0.0
+            return {
+                "total_citizens": current["total_citizens"],
+                "avg_vulnerability": current["avg_vulnerability"],
+                "critical_count": current["critical_count"],
+                "high_risk_count": current["high_risk_count"],
+                "last_updated": None,
+                "registry_total": registry_total,
+                "coverage_pct": round(coverage, 1),
+                "female_count": current["female_count"],
+                "critical_tier_count": current["critical_tier_count"],
+            }
+        return {
+            "total_citizens": 0,
+            "avg_vulnerability": 0,
+            "critical_count": 0,
+            "high_risk_count": 0,
+            "last_updated": None,
+            "registry_total": 2234522,
+            "coverage_pct": 0.0,
+            "female_count": 0,
+            "critical_tier_count": 0,
+        }
 
     data = stats[0]
     coverage = (data["live_graph_total"] / data["physical_registry_total"]) * 100
@@ -71,28 +107,6 @@ async def get_summary_stats():
         "coverage_pct": round(coverage, 1),
     }
 
-    logger.info("USR stats cache missing. Falling back to live Citizen aggregates.")
-    live_data = await run_neo4j_query("""
-        MATCH (c:Citizen)
-        RETURN
-            count(c) AS total_citizens,
-            round(coalesce(avg(c.vulnerability_score), 0) * 100) / 100 AS avg_vulnerability,
-            count(CASE WHEN c.risk_tier = 'CRITICAL' OR coalesce(c.vulnerability_score, 0) >= 80 THEN 1 END) AS critical_count,
-            count(CASE WHEN c.risk_tier IN ['HIGH', 'CRITICAL'] OR coalesce(c.vulnerability_score, 0) >= 60 THEN 1 END) AS high_risk_count,
-            count(CASE WHEN toLower(coalesce(c.gender, '')) = 'female' THEN 1 END) AS female_count,
-            count(CASE WHEN c.risk_tier = 'CRITICAL' THEN 1 END) AS critical_tier_count
-    """)
-    if live_data:
-        return live_data[0]
-
-    return {
-        "total_citizens": 0,
-        "avg_vulnerability": 0,
-        "critical_count": 0,
-        "high_risk_count": 0,
-        "female_count": 0,
-        "critical_tier_count": 0,
-    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -218,33 +232,115 @@ async def get_ghost_beneficiaries():
 
 
 @router.get("/intelligence/feed")
-async def get_intelligence_feed(limit: int = 100):
+async def get_intelligence_feed(limit: int = 100, offset: int = 0):
     """
     Unified feed of all Intelligence Flags from the Knowledge Graph.
     Consolidates Ghosts, Duplicates, and Anomalies into a single stream.
     """
+    safe_limit = max(1, min(limit, 5000))
+    safe_offset = max(0, offset)
+
+    total_rows = await run_neo4j_query(
+        """
+        CALL {
+            MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
+            RETURN 1 AS row_count
+            UNION ALL
+            MATCH (:Operator)-[rel:FLAGGED_AS]->(:FraudFlag)
+            RETURN 1 AS row_count
+            UNION ALL
+            MATCH (:RationCard)-[rel:FLAGGED_AS]->(:FraudFlag)
+            RETURN 1 AS row_count
+            UNION ALL
+            MATCH (:Citizen)-[:POTENTIAL_DUPLICATE]->(:Citizen)
+            RETURN 1 AS row_count
+            UNION ALL
+            MATCH (:Citizen)-[:SAME_DOB_AT_GP]->(:Citizen)
+            RETURN 1 AS row_count
+        }
+        RETURN count(row_count) AS total
+    """
+    )
+    total = int(total_rows[0].get("total", 0)) if total_rows else 0
+
     data = await run_neo4j_query(
         """
-        MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
-        OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)
-        RETURN 
-            f.rule AS rule,
-            coalesce(f.label, f.rule) AS label,
-            f.type AS type,
-            f.description AS description,
-            c.name AS name,
-            c.uid AS uid,
-            coalesce(c.dob, 'Unknown') AS dob,
-            coalesce(g.name, c.gp_name, 'Unknown') AS gp_name,
-            rel.confidence AS confidence,
-            rel.detected_at AS detected_at
-        ORDER BY rel.confidence DESC, rel.detected_at DESC
+        CALL {
+            MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
+            RETURN
+                f.rule AS rule,
+                coalesce(f.label, f.rule) AS label,
+                f.type AS type,
+                f.description AS description,
+                c.name AS name,
+                c.uid AS uid,
+                coalesce(c.dob, 'Unknown') AS dob,
+                coalesce(c.gp_name, 'Unknown') AS gp_name,
+                coalesce(rel.confidence, 0) AS confidence,
+                toString(rel.detected_at) AS detected_at
+            UNION ALL
+            MATCH (o:Operator)-[rel:FLAGGED_AS]->(f:FraudFlag)
+            RETURN
+                f.rule AS rule,
+                coalesce(f.label, f.rule) AS label,
+                coalesce(f.type, 'INTERNAL_ANOMALY') AS type,
+                coalesce(f.description, 'Operator-level anomaly') AS description,
+                ('Operator ' + coalesce(o.id, 'UNKNOWN')) AS name,
+                coalesce(o.id, '') AS uid,
+                'Unknown' AS dob,
+                'N/A' AS gp_name,
+                coalesce(rel.confidence, 0) AS confidence,
+                toString(rel.detected_at) AS detected_at
+            UNION ALL
+            MATCH (rc:RationCard)-[rel:FLAGGED_AS]->(f:FraudFlag)
+            RETURN
+                f.rule AS rule,
+                coalesce(f.label, f.rule) AS label,
+                coalesce(f.type, 'HOUSEHOLD_ANOMALY') AS type,
+                coalesce(f.description, 'Ration-card hub anomaly') AS description,
+                ('Ration Card ' + coalesce(rc.number, 'UNKNOWN')) AS name,
+                coalesce(rc.number, '') AS uid,
+                'Unknown' AS dob,
+                'N/A' AS gp_name,
+                coalesce(rel.confidence, 0) AS confidence,
+                toString(rel.detected_at) AS detected_at
+            UNION ALL
+            MATCH (c1:Citizen)-[rel:POTENTIAL_DUPLICATE]->(c2:Citizen)
+            RETURN
+                coalesce(rel.rule, 'B1') AS rule,
+                coalesce(rel.rule, 'B1') AS label,
+                'DUPLICATE' AS type,
+                ('Potential duplicate with ' + coalesce(c2.uid, 'unknown UID')) AS description,
+                c1.name AS name,
+                c1.uid AS uid,
+                coalesce(c1.dob, 'Unknown') AS dob,
+                coalesce(c1.gp_name, 'Unknown') AS gp_name,
+                coalesce(rel.confidence, 85) AS confidence,
+                toString(rel.detected_at) AS detected_at
+            UNION ALL
+            MATCH (c1:Citizen)-[rel:SAME_DOB_AT_GP]->(c2:Citizen)
+            RETURN
+                coalesce(rel.rule, 'B3') AS rule,
+                coalesce(rel.rule, 'B3') AS label,
+                'DUPLICATE' AS type,
+                ('Same DOB at GP as ' + coalesce(c2.uid, 'unknown UID')) AS description,
+                c1.name AS name,
+                c1.uid AS uid,
+                coalesce(c1.dob, 'Unknown') AS dob,
+                coalesce(c1.gp_name, 'Unknown') AS gp_name,
+                coalesce(rel.confidence, 80) AS confidence,
+                toString(rel.detected_at) AS detected_at
+        }
+        RETURN
+            rule, label, type, description, name, uid, dob, gp_name, confidence, detected_at
+        ORDER BY confidence DESC, detected_at DESC
+        SKIP $offset
         LIMIT $limit
     """,
-        params={"limit": limit},
+        params={"limit": safe_limit, "offset": safe_offset},
     )
 
-    return {"total": len(data), "feed": data}
+    return {"total": total, "limit": safe_limit, "offset": safe_offset, "feed": data}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -669,8 +765,41 @@ async def get_data_quality_audit():
     Shows counts for null/placeholder DOBs, missing UIDs, and other dirty data.
     """
     try:
-        results = await ai_analytics.run_data_quality_audit()
-        return results
+        checks = await ai_analytics.run_data_quality_audit()
+        total_issues = int(sum(checks.values()))
+
+        citizen_count_rows = await run_neo4j_query(
+            "MATCH (c:Citizen) RETURN count(c) AS total_citizens"
+        )
+        total_citizens = (
+            int(citizen_count_rows[0].get("total_citizens", 0)) if citizen_count_rows else 0
+        )
+
+        if total_citizens > 0:
+            integrity_index = max(
+                0.0, min(100.0, round((1.0 - (total_issues / total_citizens)) * 100.0, 1))
+            )
+        else:
+            integrity_index = 0.0
+        if total_issues > 0 and integrity_index >= 100.0:
+            integrity_index = 99.9
+
+        if integrity_index >= 95:
+            health = "GOOD"
+        elif integrity_index >= 85:
+            health = "FAIR"
+        else:
+            health = "POOR"
+
+        return {
+            "total_issues": total_issues,
+            "total_citizens": total_citizens,
+            "integrity_index": integrity_index,
+            "health": health,
+            "checks": checks,
+            # Backward-compatible flattened keys for any existing consumers.
+            **checks,
+        }
     except Exception as e:
         logger.error(f"Data quality audit failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))

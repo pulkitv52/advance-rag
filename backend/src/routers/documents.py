@@ -62,7 +62,14 @@ def _validate_file(file: UploadFile) -> None:
         )
 
 
-async def _run_ingestion(document_id: str, file_bytes: bytes, filename: str, content_type: str):
+async def _run_ingestion(
+    document_id: str,
+    file_bytes: bytes,
+    filename: str,
+    content_type: str,
+    auto_extract_eligibility: bool = False,
+    eligibility_scheme_id: Optional[str] = None,
+):
     """Background ingestion task that updates the document status in Postgres."""
     from io import BytesIO
 
@@ -98,6 +105,29 @@ async def _run_ingestion(document_id: str, file_bytes: bytes, filename: str, con
 
             if doc_result.status == "success":
                 logger.info(f"[Upload] Document '{filename}' ingested successfully.")
+                # Optional automatic eligibility rule extraction for uploaded policy PDFs.
+                if filename.lower().endswith(".pdf") and auto_extract_eligibility:
+                    from src.services import eligibility
+
+                    try:
+                        await eligibility.create_rule_from_document(
+                            session=session,
+                            document=doc_result,
+                            scheme_id=eligibility_scheme_id,
+                            rule_name=(
+                                f"Eligibility Rule - {eligibility_scheme_id}"
+                                if eligibility_scheme_id
+                                else None
+                            ),
+                        )
+                        logger.info(
+                            f"[Upload] Auto-extracted eligibility rule from '{filename}'. "
+                            f"Scheme override={eligibility_scheme_id or 'auto-detect'}"
+                        )
+                    except Exception as auto_exc:
+                        logger.warning(
+                            f"[Upload] Eligibility extraction skipped/failed for '{filename}': {auto_exc}"
+                        )
             else:
                 logger.warning(
                     f"[Upload] Document '{filename}' completed with status: {doc_result.status}"
@@ -117,6 +147,8 @@ async def upload_documents(
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     project_id: Optional[str] = Form(default=None),
+    auto_extract_eligibility: bool = Form(default=False),
+    eligibility_scheme_id: Optional[str] = Form(default=None),
     session: AsyncSession = Depends(get_session),
 ):
     """
@@ -160,6 +192,8 @@ async def upload_documents(
             file_bytes,
             file.filename,
             content_type,
+            auto_extract_eligibility,
+            eligibility_scheme_id if file.filename.lower().endswith(".pdf") else None,
         )
 
         responses.append(
@@ -168,6 +202,8 @@ async def upload_documents(
                 "filename": file.filename,
                 "status": "pending",
                 "project_id": project.id if project else None,
+                "auto_extract_eligibility": auto_extract_eligibility and file.filename.lower().endswith(".pdf"),
+                "eligibility_scheme_id_override": eligibility_scheme_id if file.filename.lower().endswith(".pdf") else None,
             }
         )
         logger.info(f"[Upload] Queued '{file.filename}' as doc_id={document_id}")
