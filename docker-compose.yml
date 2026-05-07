@@ -6,9 +6,9 @@ services:
     container_name: adv-rag-db
     restart: always
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-adv_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-app_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-app_db}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -32,8 +32,8 @@ services:
       - "${MINIO_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio_user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me}
     command: server /data --console-address ":9001"
     volumes:
       - minio_data:/data
@@ -56,17 +56,17 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-      - POSTGRES_DB=${POSTGRES_DB:-adv_rag}
+      - POSTGRES_USER=${POSTGRES_USER:-app_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_DB=${POSTGRES_DB:-app_db}
       - POSTGRES_HOST=db
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=${QDRANT_PORT:-6333}
       - MINIO_ENDPOINT=minio:9000
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password}
-      - MINIO_BUCKET=${MINIO_BUCKET:-adv-rag-docs}
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minio_user}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-change-me}
+      - MINIO_BUCKET=${MINIO_BUCKET:-project-docs}
       - REDIS_HOST=redis
       - NVIDIA_API_KEY=${NVIDIA_API_KEY}
       - NIM_BASE_URL=${NIM_BASE_URL:-https://integrate.api.nvidia.com/v1}
@@ -89,7 +89,7 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/password}
+      - NEO4J_AUTH=${NEO4J_AUTH:-neo4j/change-me}
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
       - NEO4J_dbms_security_procedures_allowlist=apoc.*,gds.*

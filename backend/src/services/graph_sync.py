@@ -19,12 +19,14 @@ from src.services.graph_db import get_driver
 settings = get_settings()
 
 DB_CONFIG = {
-    "user": "postgres",
-    "password": "postgres",
-    "database": "srsdb",
-    "host": "127.0.0.1",
-    "port": 5434,
+    "user": settings.registry_postgres_user,
+    "password": settings.registry_postgres_password,
+    "database": settings.registry_postgres_db,
+    "host": settings.registry_postgres_host,
+    "port": settings.registry_postgres_port,
 }
+
+REGISTRY_SOURCE = f"{settings.REGISTRY_SCHEMA}.{settings.REGISTRY_BENEFICIARY_TABLE}"
 
 BATCH_SIZE = 2000  # Safe batch size for Neo4j UNWIND
 CHECKPOINT_FILE = "/home/pulkitv52/Advance-rag/logs/backend/sync_checkpoint.txt"
@@ -182,7 +184,7 @@ async def sync_citizens_to_graph(limit: Optional[int] = None, batch_size: int = 
 
     try:
         # ── 1. Count total records ─────────────────────────────────────────
-        count_query = "SELECT count(*) FROM srsadmin.swasthya_sathi_beneficiary WHERE uid IS NOT NULL"
+        count_query = f"SELECT count(*) FROM {REGISTRY_SOURCE} WHERE uid IS NOT NULL"
         total_in_db = await conn.fetchval(count_query)
         cap = min(limit, total_in_db) if limit else total_in_db
         logger.info(
@@ -190,7 +192,7 @@ async def sync_citizens_to_graph(limit: Optional[int] = None, batch_size: int = 
         )
 
         # ── 2. Paginate through all records ───────────────────────────────
-        fetch_query = """
+        fetch_query = f"""
         SELECT
             uid, scheme_beneficiary_id, fullname, gender, member_dob,
             mobile, ration_card_number, address, entry_by,
@@ -200,7 +202,7 @@ async def sync_citizens_to_graph(limit: Optional[int] = None, batch_size: int = 
             scheme_id,        ration_card_memberid,
             tran_count_1,     tran_count_2,
             entry_ts
-        FROM srsadmin.swasthya_sathi_beneficiary
+        FROM {REGISTRY_SOURCE}
         WHERE uid IS NOT NULL
         ORDER BY uid
         LIMIT $1 OFFSET $2

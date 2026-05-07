@@ -3,7 +3,7 @@
 **Status:** Documented · Core implementation delivered (this doc now serves as design reference)  
 **Author:** AI Architecture Review  
 **Date:** 2026-04-15  
-**Scope:** Unified Social Registry (West Bengal srsdb — 2.2M citizens)
+**Scope:** Unified Social Registry registry-source dataset
 
 ---
 
@@ -50,7 +50,7 @@ Current implementation has since added fraud edges/flags and USR APIs for graph-
 
 | Label | Properties | Description |
 |---|---|---|
-| `Citizen` | `uid, name, dob, age, gender, risk_score (0–100), risk_tier (LOW/MODERATE/HIGH/CRITICAL), scheme_beneficiary_id, is_ghost_flag, is_dup_flag, is_anomaly_flag` | Every beneficiary from srsdb |
+| `Citizen` | `uid, name, dob, age, gender, risk_score (0–100), risk_tier (LOW/MODERATE/HIGH/CRITICAL), scheme_beneficiary_id, is_ghost_flag, is_dup_flag, is_anomaly_flag` | Every beneficiary from the registry source |
 | `GP` | `code, name, total_citizens, high_risk_count, high_risk_pct, critical_count` | Gram Panchayat — geographic unit |
 | `Block` | `code, name` | Administrative block |
 | `District` | `code, name, avg_risk_score` | District |

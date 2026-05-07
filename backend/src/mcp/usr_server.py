@@ -3,19 +3,24 @@ import asyncio
 import asyncpg
 
 from mcp.server.fastmcp import FastMCP
+from src.core.config import get_settings
 from src.services import ai_analytics
 
 # Initialize the MCP Server
 mcp = FastMCP("Unified Social Registry")
+settings = get_settings()
 
 # Database connection details
 DB_CONFIG = {
-    "user": "postgres",
-    "password": "postgres",
-    "database": "srsdb",
-    "host": "127.0.0.1",
-    "port": 5434,
+    "user": settings.registry_postgres_user,
+    "password": settings.registry_postgres_password,
+    "database": settings.registry_postgres_db,
+    "host": settings.registry_postgres_host,
+    "port": settings.registry_postgres_port,
 }
+
+REGISTRY_SOURCE = f"{settings.REGISTRY_SCHEMA}.{settings.REGISTRY_BENEFICIARY_TABLE}"
+REGISTRY_TRANSACTIONS = f"{settings.REGISTRY_SCHEMA}.{settings.REGISTRY_TRANSACTION_TABLE}"
 
 
 async def get_db_connection():
@@ -40,8 +45,8 @@ async def get_citizen_360(uid: str = None, beneficiary_id: str = None):
 
     try:
         # We query the main table (Postgres handles redirecting to the correct partition)
-        query = """
-        SELECT * FROM public.swasthya_sathi_beneficiary 
+        query = f"""
+        SELECT * FROM {REGISTRY_SOURCE}
         WHERE uid = $1 OR scheme_beneficiary_id = $2
         LIMIT 1;
         """
@@ -54,9 +59,9 @@ async def get_citizen_360(uid: str = None, beneficiary_id: str = None):
         profile = {k: str(v) if v is not None else None for k, v in dict(row).items()}
 
         # We also fetch transaction history if available
-        tran_query = """
+        tran_query = f"""
         SELECT financial_year, installment_month, amount, transaction_timestamp 
-        FROM public.swasthya_sathi_transaction_2526 
+        FROM {REGISTRY_TRANSACTIONS}
         WHERE scheme_beneficiary_id = $1
         ORDER BY transaction_timestamp DESC;
         """
@@ -75,9 +80,9 @@ async def search_citizens(name_query: str):
     """
     conn = await get_db_connection()
     try:
-        query = """
+        query = f"""
         SELECT fullname, lgd_district_name, lgd_block_name, scheme_beneficiary_id 
-        FROM public.swasthya_sathi_beneficiary 
+        FROM {REGISTRY_SOURCE}
         WHERE fullname ILIKE $1
         LIMIT 10;
         """
@@ -94,12 +99,12 @@ async def get_district_stats(district_code: int):
     """
     conn = await get_db_connection()
     try:
-        query = """
+        query = f"""
         SELECT 
             COUNT(*) as total_beneficiaries,
             COUNT(CASE WHEN gender = 'FEMALE' THEN 1 END) as female_count,
             COUNT(CASE WHEN gender = 'MALE' THEN 1 END) as male_count
-        FROM public.swasthya_sathi_beneficiary 
+        FROM {REGISTRY_SOURCE}
         WHERE lgd_district_code = $1;
         """
         stats = await conn.fetchrow(query, district_code)

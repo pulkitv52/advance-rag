@@ -4,8 +4,8 @@ This plan outlines the steps to build the first Model Context Protocol (MCP) ser
 
 ## Phase 0: Database Restoration
 **Goal:** Prepare the live source of truth.
-1.  **Command:** `createdb -h localhost -U postgres srsdb`
-2.  **Command:** `pg_restore -h localhost -U postgres -d srsdb srsdb.dump`
+1.  **Command:** `createdb -h localhost -U postgres registry_db`
+2.  **Command:** `pg_restore -h localhost -U postgres -d registry_db registry_source.dump`
 3.  **Verification:** Run `SELECT count(*) FROM public.swasthya_sathi_beneficiary;` in pgAdmin.
 
 ## Phase 1: MCP Server Core

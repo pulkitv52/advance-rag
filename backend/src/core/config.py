@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,9 +12,9 @@ class Settings(BaseSettings):
     API_BASE_URL: str = "http://localhost:8000"
 
     # --- PostgreSQL ---
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "postgres"
-    POSTGRES_DB: str = "adv_rag"
+    POSTGRES_USER: str = "app_user"
+    POSTGRES_PASSWORD: str = "change-me"
+    POSTGRES_DB: str = "app_db"
     POSTGRES_HOST: str = "127.0.0.1"
     POSTGRES_PORT: int = 5432
 
@@ -23,6 +24,36 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
+
+    # --- Registry Source PostgreSQL ---
+    REGISTRY_POSTGRES_USER: Optional[str] = None
+    REGISTRY_POSTGRES_PASSWORD: Optional[str] = None
+    REGISTRY_POSTGRES_DB: Optional[str] = None
+    REGISTRY_POSTGRES_HOST: Optional[str] = None
+    REGISTRY_POSTGRES_PORT: Optional[int] = None
+    REGISTRY_SCHEMA: str = "srsadmin"
+    REGISTRY_BENEFICIARY_TABLE: str = "swasthya_sathi_beneficiary"
+    REGISTRY_TRANSACTION_TABLE: str = "swasthya_sathi_transaction_2526"
+
+    @property
+    def registry_postgres_user(self) -> str:
+        return self.REGISTRY_POSTGRES_USER or self.POSTGRES_USER
+
+    @property
+    def registry_postgres_password(self) -> str:
+        return self.REGISTRY_POSTGRES_PASSWORD or self.POSTGRES_PASSWORD
+
+    @property
+    def registry_postgres_db(self) -> str:
+        return self.REGISTRY_POSTGRES_DB or self.POSTGRES_DB
+
+    @property
+    def registry_postgres_host(self) -> str:
+        return self.REGISTRY_POSTGRES_HOST or self.POSTGRES_HOST
+
+    @property
+    def registry_postgres_port(self) -> int:
+        return self.REGISTRY_POSTGRES_PORT or self.POSTGRES_PORT
 
     # --- Qdrant ---
     QDRANT_HOST: str = "127.0.0.1"
@@ -34,13 +65,13 @@ class Settings(BaseSettings):
     # --- Neo4j ---
     NEO4J_URI: str = "bolt://localhost:7687"
     NEO4J_USER: str = "neo4j"
-    NEO4J_PASSWORD: str = "password"
+    NEO4J_PASSWORD: str = "change-me"
 
     # --- Minio ---
     MINIO_ENDPOINT: str = "127.0.0.1:9000"
-    MINIO_ROOT_USER: str = "admin"
-    MINIO_ROOT_PASSWORD: str = "password"
-    MINIO_BUCKET: str = "adv-rag-docs"
+    MINIO_ROOT_USER: str = "minio_user"
+    MINIO_ROOT_PASSWORD: str = "change-me"
+    MINIO_BUCKET: str = "project-docs"
     MINIO_USE_SSL: bool = False
 
     # --- Redis ---

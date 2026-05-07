@@ -15,7 +15,7 @@ There are two parallel data tracks in the platform:
   - value: semantic retrieval, narrative analysis, document-grounded Q&A
 
 - **Structured track**
-  - input: `srsdb.dump` restored to PostgreSQL, then synced to Neo4j
+  - input: registry-source data restored to PostgreSQL, then synced to Neo4j
   - powers: Social Registry Dashboard + USR fraud endpoints
   - value: fraud risk analysis, alerting, triage, and audit prioritization
 

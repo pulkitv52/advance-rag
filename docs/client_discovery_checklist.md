@@ -39,7 +39,7 @@ Notes:
 
 ## 3) Data Questions (Based on Provided Dump)
 
-- [ ] Is `srsdb.dump` fully representative of production data?
+- [ ] Is the registry-source dump fully representative of production data?
 - [ ] Which fields are trusted vs noisy vs incomplete?
 - [ ] What is source-of-truth for eligibility criteria and policy updates?
 - [ ] Can we receive incremental updates (delta/CDC), not only full dumps?
@@ -138,4 +138,3 @@ Immediate next actions:
 1. __________________________________________  
 2. __________________________________________  
 3. __________________________________________
-

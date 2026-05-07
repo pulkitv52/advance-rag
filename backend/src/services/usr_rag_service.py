@@ -11,12 +11,14 @@ from src.services.vector_db import upsert_chunks
 settings = get_settings()
 
 DB_CONFIG = {
-    "user": "postgres",
-    "password": "postgres",
-    "database": "srsdb",
-    "host": "127.0.0.1",
-    "port": 5434,
+    "user": settings.registry_postgres_user,
+    "password": settings.registry_postgres_password,
+    "database": settings.registry_postgres_db,
+    "host": settings.registry_postgres_host,
+    "port": settings.registry_postgres_port,
 }
+
+REGISTRY_SOURCE = f"{settings.REGISTRY_SCHEMA}.{settings.REGISTRY_BENEFICIARY_TABLE}"
 
 BATCH_SIZE = 100
 
@@ -55,8 +57,8 @@ async def index_usr_for_research(limit: int = 5000):
     conn = await asyncpg.connect(**DB_CONFIG)
     try:
         # Fetch high risk citizens first
-        query = """
-            SELECT * FROM srsadmin.swasthya_sathi_beneficiary 
+        query = f"""
+            SELECT * FROM {REGISTRY_SOURCE}
             WHERE uid IS NOT NULL
             ORDER BY uid
             LIMIT $1
@@ -89,7 +91,7 @@ async def index_usr_for_research(limit: int = 5000):
                 embeddings=embeddings,
                 document_id="USR_DUMP_001",
                 filename="Unified_Social_Registry_Database",
-                object_key="sql://srsdb/beneficiaries",
+                object_key="sql://registry-source/beneficiaries",
             )
 
         logger.info("USR RAG Indexing complete.")

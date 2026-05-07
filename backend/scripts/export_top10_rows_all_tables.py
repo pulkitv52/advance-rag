@@ -25,11 +25,11 @@ def parse_schemas(raw_schemas: str) -> list[str]:
 
 
 def build_dsn(args: argparse.Namespace) -> str:
-    user = args.user or os.getenv("POSTGRES_USER", "postgres")
-    password = args.password or os.getenv("POSTGRES_PASSWORD", "postgres")
+    user = args.user or os.getenv("POSTGRES_USER", "app_user")
+    password = args.password or os.getenv("POSTGRES_PASSWORD", "change-me")
     host = args.host or os.getenv("POSTGRES_HOST", "127.0.0.1")
     port = args.port or int(os.getenv("POSTGRES_PORT", "5434"))
-    database = args.database or os.getenv("POSTGRES_DB", "adv_rag")
+    database = args.database or os.getenv("POSTGRES_DB", "app_db")
     return f"postgresql://{user}:{password}@{host}:{port}/{database}"
 
 
@@ -66,7 +66,7 @@ async def run_export(args: argparse.Namespace) -> dict[str, Any]:
     dsn = build_dsn(args)
     schemas = parse_schemas(args.schemas)
     output: dict[str, Any] = {
-        "database": args.database or os.getenv("POSTGRES_DB", "adv_rag"),
+        "database": args.database or os.getenv("POSTGRES_DB", "app_db"),
         "schemas": schemas,
         "limit_per_table": args.limit,
         "tables": {},

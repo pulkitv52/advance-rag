@@ -108,7 +108,6 @@ async def get_summary_stats():
     }
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # District Heatmap
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,8 +239,7 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
     safe_limit = max(1, min(limit, 5000))
     safe_offset = max(0, offset)
 
-    total_rows = await run_neo4j_query(
-        """
+    total_rows = await run_neo4j_query("""
         CALL {
             MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
             RETURN 1 AS row_count
@@ -259,8 +257,7 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
             RETURN 1 AS row_count
         }
         RETURN count(row_count) AS total
-    """
-    )
+    """)
     total = int(total_rows[0].get("total", 0)) if total_rows else 0
 
     data = await run_neo4j_query(
@@ -696,7 +693,7 @@ async def get_graph_stats():
 async def clear_graph(confirm: str = Query(..., description="Must be 'yes-delete-all' to confirm")):
     """
     DESTRUCTIVE: Deletes ALL nodes and relationships from Neo4j.
-    Use this to remove mixed PDF-document nodes before re-syncing purely from srsdb.
+    Use this to remove mixed PDF-document nodes before re-syncing purely from the registry source.
     Requires confirm=yes-delete-all query param as a safety gate.
     """
     if confirm != "yes-delete-all":
@@ -727,7 +724,7 @@ async def clear_graph(confirm: str = Query(..., description="Must be 'yes-delete
         return {
             "status": "cleared",
             "nodes_deleted": total_before,
-            "message": "Neo4j graph wiped. Run POST /api/usr/run-sync to rebuild from srsdb.",
+            "message": "Neo4j graph wiped. Run POST /api/usr/run-sync to rebuild from the registry source.",
         }
     except Exception as e:
         logger.error(f"Graph clear failed: {e}")

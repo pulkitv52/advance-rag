@@ -15,7 +15,7 @@ This repository has both **unstructured** and **structured** intelligence pipeli
   - purpose: semantic research and cross-document reasoning
 
 - **Structured pipeline (social registry):**
-  - source: `srsdb.dump` restored into PostgreSQL (`public.swasthya_sathi_beneficiary` and related fields)
+  - source: a configured registry-source database restored into PostgreSQL beneficiary tables
   - modules: Social Registry Dashboard and USR fraud APIs
   - purpose: fraud intelligence, risk scoring, and audit prioritization
 
@@ -60,7 +60,7 @@ When a user queries, the system extracts entities from the question, finds their
 
 ### Purpose
 
-The USR graph transforms the srsdb PostgreSQL dump (2.2M citizens) into a **fraud detection network** where fraud signals become first-class graph relationships — visible, traversable, and analyzable by the LLM.
+The USR graph transforms a registry-source PostgreSQL dataset into a **fraud detection network** where fraud signals become first-class graph relationships — visible, traversable, and analyzable by the LLM.
 
 ### Why Graph over SQL?
 
@@ -204,7 +204,7 @@ As of April 20, 2026:
 
 ### USR graph — triggered manually
 ```bash
-# Step 1: Sync citizens from srsdb
+# Step 1: Sync citizens from the configured registry source
 curl -X POST "http://localhost:8081/api/usr/run-sync?limit=50000"
 
 # Step 2: Run fraud batch (creates fraud edges in Neo4j)

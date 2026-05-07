@@ -37,7 +37,7 @@ async def run_test():
                 print(f"Stats: {stats.content[0].text}")
     except Exception as e:
         print(f"\n[ERROR] Test failed: {e}")
-        print("\nNote: Ensure 'srsdb' is restored and Postgres is running on localhost:5432.")
+        print("\nNote: Ensure the configured registry source is restored and Postgres is running.")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ Thumbs.db
 
 # Local agent/runtime files
 .codex
+AGENTS.md
 *.Zone.Identifier
 *:Zone.Identifier
 

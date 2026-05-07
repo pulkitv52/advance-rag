@@ -1,11 +1,11 @@
-"""Export top 10 rows from all SRSDB tables into a single CSV file.
+"""Export top rows from a configured registry database into a single CSV file.
 
-Connection defaults intentionally mirror backend/src/mcp/usr_server.py:
+Connection defaults intentionally mirror the generic registry-source settings:
 - host: 127.0.0.1
-- port: 5434
-- database: srsdb
-- user: postgres
-- password: postgres
+- port: 5432
+- database: registry_db
+- user: registry_user
+- password: change-me
 """
 
 from __future__ import annotations
@@ -22,11 +22,11 @@ import asyncpg
 
 SYSTEM_SCHEMAS = {"pg_catalog", "information_schema", "pg_toast"}
 DEFAULT_DB_CONFIG = {
-    "user": "postgres",
-    "password": "postgres",
-    "database": "srsdb",
+    "user": "registry_user",
+    "password": "change-me",
+    "database": "registry_db",
     "host": "127.0.0.1",
-    "port": 5434,
+    "port": 5432,
 }
 
 
@@ -36,15 +36,15 @@ def quote_identifier(identifier: str) -> str:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export top N rows from all tables in srsdb to a CSV file."
+        description="Export top N rows from all tables in a registry database to a CSV file."
     )
     parser.add_argument(
         "--limit", type=int, default=10, help="Rows per table (default: 10)"
     )
     parser.add_argument(
         "--output",
-        default="srsdb_top10_all_tables.csv",
-        help="Output CSV path (default: ./srsdb_top10_all_tables.csv)",
+        default="registry_top10_all_tables.csv",
+        help="Output CSV path (default: ./registry_top10_all_tables.csv)",
     )
     parser.add_argument(
         "--schemas",
@@ -57,19 +57,20 @@ def parse_args() -> argparse.Namespace:
 def build_db_config() -> dict[str, Any]:
     return {
         "user": os.getenv(
-            "SRSDB_USER", os.getenv("POSTGRES_USER", DEFAULT_DB_CONFIG["user"])
+            "REGISTRY_POSTGRES_USER", os.getenv("POSTGRES_USER", DEFAULT_DB_CONFIG["user"])
         ),
         "password": os.getenv(
-            "SRSDB_PASSWORD",
+            "REGISTRY_POSTGRES_PASSWORD",
             os.getenv("POSTGRES_PASSWORD", DEFAULT_DB_CONFIG["password"]),
         ),
-        "database": os.getenv("SRSDB_NAME", DEFAULT_DB_CONFIG["database"]),
+        "database": os.getenv("REGISTRY_POSTGRES_DB", DEFAULT_DB_CONFIG["database"]),
         "host": os.getenv(
-            "SRSDB_HOST", os.getenv("POSTGRES_HOST", DEFAULT_DB_CONFIG["host"])
+            "REGISTRY_POSTGRES_HOST", os.getenv("POSTGRES_HOST", DEFAULT_DB_CONFIG["host"])
         ),
         "port": int(
             os.getenv(
-                "SRSDB_PORT", os.getenv("POSTGRES_PORT", str(DEFAULT_DB_CONFIG["port"]))
+                "REGISTRY_POSTGRES_PORT",
+                os.getenv("POSTGRES_PORT", str(DEFAULT_DB_CONFIG["port"])),
             )
         ),
     }

@@ -6,7 +6,7 @@ This roadmap outlines the journey from a single database dump to a production-gr
 
 ## 🟢 Phase 1: The Foundation (Current)
 **Goal:** Transform raw data into an accessible "Intelligent Service."
-1.  **Data Restoration:** Move `srsdb.dump` into a live, partitioned PostgreSQL instance.
+1.  **Data Restoration:** Move the registry-source dump into a live, partitioned PostgreSQL instance.
 2.  **MCP Server Implementation:** Create the "Translator" layer. This allows the AI to query the database using standardized tools (e.g., `get_citizen_360`).
 3.  **Schema Mapping:** Use LLM to document the semantic meaning of every column in the Swasthya Sathi database.
 

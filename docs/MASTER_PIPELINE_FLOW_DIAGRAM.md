@@ -6,7 +6,7 @@ flowchart LR
   %% DATA SOURCES
   %% =========================
   subgraph S1[Data Sources]
-    A1[Structured Registry Data<br/>srsdb.dump -> PostgreSQL]
+    A1[Structured Registry Data<br/>Registry Source -> PostgreSQL]
     A2[Unstructured Documents<br/>PDF/DOC uploads]
     A3[Optional Signals<br/>Grievances / Ops Feedback]
   end

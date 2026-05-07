@@ -16,7 +16,7 @@ Transform the current Unified Social Registry (USR) implementation into a produc
 
 ### Backend already in place
 
-- Graph sync from `srsdb` to Neo4j (`run-sync`)
+- Graph sync from the registry source to Neo4j (`run-sync`)
 - Batch intelligence run with rules A/B/C/E/F/H/I (`run-batch`)
 - Vulnerability scoring and risk tier assignment
 - USR APIs for stats, heatmap, top-risk, intelligence feed, audit queue, operator audit, graph neighborhood
