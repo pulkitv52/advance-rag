@@ -39,6 +39,7 @@ AGENTS.md
 
 # Large local data artifacts
 srsdb.dump
+*.sql
 srsdb_top10_all_tables.csv
 srsdb_top10_all_tables_by_table.xlsx
 top10_rows_all_tables.json
@@ -47,3 +48,6 @@ top10_rows_all_tables.json
 frontend/build_error.log
 frontend/build_full.log
 frontend/tsc_errors.log
+
+# Branding / Logos
+frontend/public/kpmg_logo.png

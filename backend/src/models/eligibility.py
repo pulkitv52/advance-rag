@@ -64,3 +64,16 @@ class EligibilitySchemaSignal(SQLModel, table=True):
     first_seen_at: datetime = Field(default_factory=datetime.utcnow)
     last_seen_at: datetime = Field(default_factory=datetime.utcnow)
     sample_quotes: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+class EligibilityManualInput(SQLModel, table=True):
+    """Persisted manual input values keyed by rule + citizen for re-evaluation."""
+
+    __tablename__ = "eligibility_manual_inputs"
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    rule_id: str = Field(foreign_key="eligibility_rules.id", index=True)
+    citizen_uid: str = Field(index=True)
+    values_json: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)

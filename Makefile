@@ -1,6 +1,6 @@
 # Advance-Rag Makefile
 
-.PHONY: help up down nuke up-all down-all nuke-all install-uv backend-setup backend-start backend-stop logs-backend install-pnpm frontend-setup frontend-start frontend-stop frontend-preview logs-frontend start stop setup restart logs ps health build
+.PHONY: help up down nuke up-all down-all nuke-all install-uv backend-setup backend-start backend-stop logs-backend install-pnpm frontend-setup frontend-start frontend-stop frontend-preview logs-frontend start stop setup restart logs ps health build logs-reset
 
 # Variables
 DOCKER_COMPOSE = -f docker-compose.yml
@@ -25,7 +25,7 @@ help:
 
 # Infra Management
 up:
-	$(DOCKER) $(DOCKER_COMPOSE) up -d db qdrant minio redis neo4j
+	$(DOCKER) $(DOCKER_COMPOSE) up -d db pgadmin qdrant minio redis neo4j
 
 down:
 	$(DOCKER) $(DOCKER_COMPOSE) down
@@ -54,12 +54,15 @@ backend-setup:
 
 backend-start:
 	@mkdir -p $(LOG_DIR_BACKEND)
+	@mkdir -p $(LOG_DIR_FRONTEND)
+	@: > $(LOG_DIR_BACKEND)/app.log
+	@: > $(LOG_DIR_FRONTEND)/app.log
 	@echo "Starting backend..."
 	@cd backend && nohup sh -cl "uv run python -m uvicorn src.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload" > ../$(LOG_DIR_BACKEND)/app.log 2>&1 &
 
 backend-stop:
 	@echo "Stopping backend..."
-	@pkill -f "uvicorn src.main:app" || true
+	@bash -lc "pids=\$$(pgrep -f '[u]vicorn src.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload' || true); [ -n \"\$$pids\" ] && kill \$$pids || true"
 
 logs-backend:
 	tail -f $(LOG_DIR_BACKEND)/app.log
@@ -77,15 +80,21 @@ frontend-setup:
 
 frontend-start:
 	@mkdir -p $(LOG_DIR_FRONTEND)
+	@: > $(LOG_DIR_FRONTEND)/dev.log
 	@echo "Starting frontend..."
 	@$(MAKE) frontend-stop >/dev/null 2>&1 || true
 	@cd frontend && nohup pnpm dev --host 0.0.0.0 --port $(FRONTEND_PORT) --strictPort </dev/null > ../$(LOG_DIR_FRONTEND)/dev.log 2>&1 &
 
+logs-reset:
+	@mkdir -p $(LOG_DIR_BACKEND) $(LOG_DIR_FRONTEND)
+	@: > $(LOG_DIR_BACKEND)/app.log
+	@: > $(LOG_DIR_FRONTEND)/dev.log
+	@: > $(LOG_DIR_FRONTEND)/app.log
+	@echo "Logs reset: backend/app.log, frontend/dev.log, frontend/app.log"
+
 frontend-stop:
 	@echo "Stopping frontend..."
-	@bash -lc "ps -eo pid=,args= | grep '/home/pulkitv52/Advance-rag/frontend' | grep 'pnpm dev --host 0.0.0.0 --port $(FRONTEND_PORT) --strictPort' | grep -v grep | awk '{print \$$1}' | xargs -r kill" || true
-	@bash -lc "ps -eo pid=,args= | grep '/home/pulkitv52/Advance-rag/frontend' | grep 'vite/bin/vite.js --port $(FRONTEND_PORT)' | grep -v grep | awk '{print \$$1}' | xargs -r kill" || true
-	@bash -lc "ps -eo pid=,args= | grep '/home/pulkitv52/Advance-rag/frontend' | grep '@esbuild/.*/bin/esbuild --service' | grep -v grep | awk '{print \$$1}' | xargs -r kill" || true
+	@fuser -k -TERM $(FRONTEND_PORT)/tcp >/dev/null 2>&1 || true
 
 frontend-preview:
 	cd frontend && pnpm build && pnpm preview
@@ -102,7 +111,7 @@ start: up
 	@echo "All services starting. Check logs/ directory for output."
 
 stop: backend-stop frontend-stop
-	$(DOCKER) $(DOCKER_COMPOSE) stop
+	$(DOCKER) $(DOCKER_COMPOSE) down --remove-orphans
 
 setup: install-uv install-pnpm
 	$(MAKE) backend-setup

@@ -1,5 +1,6 @@
 from src.models.eligibility import EligibilityRule
 from src.services.eligibility import (
+    _build_priority_criteria_context,
     detect_scheme_id_from_filename,
     evaluate_citizen_against_rule,
     extract_eligibility_metadata,
@@ -83,6 +84,12 @@ def test_detect_scheme_id_from_filename_s_with_leading_zero():
     assert "S051" in detected["candidates"]
 
 
+def test_detect_scheme_id_from_filename_c_prefix():
+    detected = detect_scheme_id_from_filename("doc_QB_C501_0.pdf")
+    assert detected["scheme_id"] == "C501"
+    assert "C501" in detected["candidates"]
+
+
 def test_non_blocking_unmapped_criteria_do_not_force_review_required():
     rule = EligibilityRule(
         scheme_id="S767",
@@ -121,3 +128,20 @@ def test_missing_required_feature_returns_review_required():
     outcome = evaluate_citizen_against_rule(citizen, rule)
     assert outcome["decision"] == "REVIEW_REQUIRED"
     assert "employment_status" in outcome["reason"]
+
+
+def test_priority_criteria_context_extracts_relevant_windows():
+    text = """
+    This circular contains administrative notes.
+    Eligibility: retired tea garden workers can apply.
+    Inclusion criteria: age between 18 and 60, and annual income below 120000.
+    Exclusion criteria: not eligible if receives pension.
+    Other annexure details follow.
+    """
+
+    focused = _build_priority_criteria_context(text)
+
+    assert focused["focused_text"]
+    assert "retired tea garden workers can apply" in focused["focused_text"].lower()
+    assert "not eligible if receives pension" in focused["focused_text"].lower()
+    assert "eligibility" in focused["matches"]

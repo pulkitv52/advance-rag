@@ -4,6 +4,7 @@ import axios from "axios"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Card } from "./ui/card"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog"
 import { Input } from "./ui/input"
 
 interface EligibilityStudioProps {
@@ -36,8 +37,24 @@ interface DecisionRow {
   citizen_name?: string | null
   citizen_scheme_id?: string | null
   decision: "INCLUSION_ERROR" | "EXCLUSION_ERROR" | "VALID_ENROLLMENT" | "NOT_APPLICABLE" | "REVIEW_REQUIRED"
+  decision_bucket?: string
   reason: string
   decision_confidence: number
+  evidence_json?: {
+    checks?: Array<{
+      field?: string
+      operator?: string
+      expected?: unknown
+      actual?: unknown
+      passed?: boolean
+    }>
+    source_values?: Record<string, unknown>
+    checked_fields?: string[]
+    missing_required_fields?: string[]
+    blocking_unmapped_criteria?: string[]
+    manual_inputs?: Record<string, unknown>
+  }
+  suggested_manual_fields?: string[]
   created_at?: string
 }
 
@@ -47,6 +64,16 @@ interface EvaluationSummary {
   evaluated: number
   decisions_saved: number
   counts: Record<string, number>
+  bucket_counts?: Record<string, number>
+  bucket_mapping?: Record<string, string>
+  evaluation_basis?: {
+    message?: string
+    executable_include_fields?: string[]
+    executable_exclude_fields?: string[]
+    unmapped_criteria?: string[]
+    no_population_found?: boolean
+    no_population_reason?: string | null
+  }
   preview: Array<{
     uid: string
     scheme_id: string
@@ -58,7 +85,7 @@ interface EvaluationSummary {
 
 const inferSchemeIdFromFilename = (filename: string): string => {
   const upper = String(filename || "").toUpperCase()
-  const match = upper.match(/(?:^|[^A-Z0-9])(SS_\d{2,6}|S\d{2,6})(?:[^A-Z0-9]|$)/)
+  const match = upper.match(/(?:^|[^A-Z0-9])(SS_\d{2,6}|S\d{2,6}|C\d{2,6})(?:[^A-Z0-9]|$)/)
   return match ? match[1] : ""
 }
 
@@ -70,6 +97,41 @@ const decisionColor: Record<string, string> = {
   REVIEW_REQUIRED: "bg-violet-100 text-violet-700",
 }
 
+const bucketLabel: Record<string, string> = {
+  ELIGIBLE_ENROLLED: "Eligible + Enrolled",
+  NOT_ELIGIBLE_ENROLLED: "Not Eligible + Enrolled",
+  ELIGIBLE_NOT_ENROLLED: "Eligible + Not Enrolled",
+  NOT_ELIGIBLE_NOT_ENROLLED: "Not Eligible + Not Enrolled",
+  REVIEW_REQUIRED: "Review Required",
+}
+
+const formatValue = (value: unknown): string => {
+  if (value === null || value === undefined || value === "") return "-"
+  if (typeof value === "object") return JSON.stringify(value)
+  return String(value)
+}
+
+const buildDecisionBasis = (row: DecisionRow): string => {
+  const checks = row.evidence_json?.checks || []
+  if (checks.length > 0) {
+    const top = checks.slice(0, 3).map((c) => {
+      const field = c.field || "field"
+      const operator = c.operator || "op"
+      const expected = formatValue(c.expected)
+      const actual = formatValue(c.actual)
+      return `${field} ${operator} ${expected} (actual=${actual})`
+    })
+    return top.join(" | ")
+  }
+
+  const src = row.evidence_json?.source_values || {}
+  const quickKeys = ["scheme_id", "employment_status", "annual_income", "caste", "closing_date"]
+  const parts = quickKeys
+    .filter((k) => src[k] !== undefined && src[k] !== null && src[k] !== "")
+    .map((k) => `${k}=${formatValue(src[k])}`)
+  return parts.length > 0 ? parts.join(" | ") : "No check-level evidence captured."
+}
+
 export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [documents, setDocuments] = useState<DocumentRow[]>([])
   const [rules, setRules] = useState<RuleRow[]>([])
@@ -77,7 +139,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
 
   const [selectedDocumentId, setSelectedDocumentId] = useState("")
   const [schemeId, setSchemeId] = useState("")
-  const [ruleName, setRuleName] = useState("")
   const [selectedRuleId, setSelectedRuleId] = useState("")
   const [runLimit, setRunLimit] = useState("500")
 
@@ -88,6 +149,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [loadingDocs, setLoadingDocs] = useState(false)
   const [loadingRules, setLoadingRules] = useState(false)
   const [loadingDecisions, setLoadingDecisions] = useState(false)
+  const [showAllDecisions, setShowAllDecisions] = useState(false)
 
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -95,6 +157,9 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [operationLabel, setOperationLabel] = useState("")
   const [operationProgress, setOperationProgress] = useState(0)
   const [operationActive, setOperationActive] = useState(false)
+  const [editingDecisionId, setEditingDecisionId] = useState<string | null>(null)
+  const [savingManual, setSavingManual] = useState(false)
+  const [manualInputDrafts, setManualInputDrafts] = useState<Record<string, Record<string, string>>>({})
   const progressTimerRef = useRef<number | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const [trackedUploadDocId, setTrackedUploadDocId] = useState<string | null>(null)
@@ -174,19 +239,22 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   }, [API, selectedRuleId])
 
   const loadDecisions = useCallback(async (ruleId?: string, silent = false) => {
-    const targetRule = ruleId || selectedRuleId
-    if (!targetRule) return
+    const targetRule = showAllDecisions ? "" : (ruleId || selectedRuleId)
+    if (!showAllDecisions && !targetRule) return
 
     if (!silent) setLoadingDecisions(true)
     try {
-      const res = await axios.get(`${API}/api/eligibility/decisions?rule_id=${targetRule}&limit=200`)
+      const url = targetRule
+        ? `${API}/api/eligibility/decisions?rule_id=${targetRule}&limit=200`
+        : `${API}/api/eligibility/decisions?limit=200`
+      const res = await axios.get(url)
       setDecisions((res.data?.decisions || []) as DecisionRow[])
     } catch (e: any) {
       setError(e?.response?.data?.detail || "Failed to load decisions")
     } finally {
       if (!silent) setLoadingDecisions(false)
     }
-  }, [API, selectedRuleId])
+  }, [API, selectedRuleId, showAllDecisions])
 
   const handleExtract = async () => {
     if (!selectedDocumentId) {
@@ -203,7 +271,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       advanceOperationProgress("Parsing document text...", 25)
       const res = await axios.post(`${API}/api/eligibility/rules/extract/${selectedDocumentId}`, {
         scheme_id: schemeId.trim() || undefined,
-        rule_name: ruleName.trim() || undefined,
       })
       advanceOperationProgress("Saving extracted criteria and refreshing rules...", 70)
       setSuccess(`Rule extracted: ${res.data?.rule_name} (version ${res.data?.rule_version})`)
@@ -301,7 +368,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     try {
       const lim = Math.max(1, Number.parseInt(runLimit || "500", 10) || 500)
       advanceOperationProgress(`Evaluating ${lim.toLocaleString()} citizens...`, 30)
-      const res = await axios.post(`${API}/api/eligibility/evaluate/${selectedRuleId}?limit=${lim}`)
+      const res = await axios.post(`${API}/api/eligibility/evaluate/${selectedRuleId}?limit=${lim}&scheme_only=true`)
       advanceOperationProgress("Saving decisions and loading latest rows...", 80)
       setLatestSummary(res.data as EvaluationSummary)
       setSuccess("Evaluation run completed.")
@@ -314,6 +381,84 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       setEvaluating(false)
     }
   }
+
+  const handleEvaluateAllRules = async () => {
+    setEvaluating(true)
+    setError(null)
+    setSuccess(null)
+    beginOperationProgress("Running eligibility evaluation for all active rules...")
+    try {
+      const lim = Math.max(1, Number.parseInt(runLimit || "500", 10) || 500)
+      const res = await axios.post(`${API}/api/eligibility/evaluate-all?limit=${lim}&scheme_only=true`)
+      const totalRules = Number(res.data?.total_rules || 0)
+      setSuccess(`Evaluation completed for ${totalRules} active rules.`)
+      setShowAllDecisions(true)
+      await loadDecisions(undefined)
+      completeOperationProgress("Evaluation for all rules completed.")
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Evaluate-all failed")
+      completeOperationProgress("Evaluate-all failed.")
+    } finally {
+      setEvaluating(false)
+    }
+  }
+
+  const parseManualInputValue = (raw: string): unknown => {
+    const v = raw.trim()
+    if (!v) return null
+    const upper = v.toUpperCase()
+    if (["TRUE", "YES", "Y", "1"].includes(upper)) return true
+    if (["FALSE", "NO", "N", "0"].includes(upper)) return false
+    if (!Number.isNaN(Number(v)) && /^-?\d+(\.\d+)?$/.test(v)) return Number(v)
+    return v
+  }
+
+  const handleRejudge = async (row: DecisionRow) => {
+    const draft = manualInputDrafts[row.id] || {}
+    const manual_inputs: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(draft)) {
+      if (v.trim()) manual_inputs[k] = parseManualInputValue(v)
+    }
+
+    try {
+      setSavingManual(true)
+      const res = await axios.post(`${API}/api/eligibility/decisions/${row.id}/manual-inputs`, {
+        manual_inputs,
+        scheme_only: true,
+      })
+      const updated = res.data as DecisionRow
+      setDecisions((prev) => prev.map((d) => (d.id === row.id ? { ...d, ...updated } : d)))
+      setSuccess(`Decision updated for UID ${row.citizen_uid} using manual inputs.`)
+      setError(null)
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Failed to apply manual inputs")
+    } finally {
+      setSavingManual(false)
+    }
+  }
+
+  const activeEditingRow = useMemo(
+    () => decisions.find((d) => d.id === editingDecisionId) || null,
+    [decisions, editingDecisionId],
+  )
+  const activeSuggestedFields = useMemo(
+    () => (activeEditingRow?.suggested_manual_fields || []).filter((f) => f && f.trim()),
+    [activeEditingRow],
+  )
+  const activeRemainingMissingFields = useMemo(
+    () =>
+      (activeEditingRow?.evidence_json?.missing_required_fields || []).filter(
+        (f) => f && String(f).trim(),
+      ),
+    [activeEditingRow],
+  )
+  const activeRemainingUnmapped = useMemo(
+    () =>
+      (activeEditingRow?.evidence_json?.blocking_unmapped_criteria || []).filter(
+        (f) => f && String(f).trim(),
+      ),
+    [activeEditingRow],
+  )
 
   useEffect(() => {
     void loadDocuments()
@@ -502,11 +647,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                 <Input value={schemeId} onChange={(e) => setSchemeId(e.target.value)} placeholder="Auto-detect from filename/text (e.g., S767)" className="rounded-xl" />
               </div>
 
-              <div>
-                <p className="mb-1 text-xs font-semibold text-slate-500">Rule Name (optional)</p>
-                <Input value={ruleName} onChange={(e) => setRuleName(e.target.value)} placeholder="Widow Pension Eligibility" className="rounded-xl" />
-              </div>
-
               <Button className="w-full rounded-xl" onClick={handleExtract} disabled={extracting || !selectedDocumentId}>
                 {extracting ? "Extracting metadata..." : "Extract Eligibility Metadata"}
               </Button>
@@ -544,58 +684,34 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
               <Button className="w-full rounded-xl" onClick={handleEvaluate} disabled={evaluating || !selectedRuleId}>
                 {evaluating ? "Running evaluation..." : "Run Inclusion/Exclusion Evaluation"}
               </Button>
+              <Button
+                variant="outline"
+                className="w-full rounded-xl"
+                onClick={handleEvaluateAllRules}
+                disabled={evaluating || rules.length === 0}
+              >
+                {evaluating ? "Running..." : "Run Evaluation For All Rules"}
+              </Button>
 
               <Button
                 variant="outline"
                 className="w-full rounded-xl"
                 onClick={() => loadDecisions(selectedRuleId)}
-                disabled={!selectedRuleId || loadingDecisions}
+                disabled={(!selectedRuleId && !showAllDecisions) || loadingDecisions}
               >
                 {loadingDecisions ? "Loading decisions..." : "Refresh Decisions"}
               </Button>
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showAllDecisions}
+                  onChange={(e) => setShowAllDecisions(e.target.checked)}
+                />
+                Show decisions from all schemes/rules
+              </label>
             </div>
           </Card>
         </div>
-
-        <Card className="rounded-3xl border-slate-200 bg-white p-6">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Document Processing Status</p>
-            <p className="text-xs font-semibold text-slate-500">{documents.length} documents</p>
-          </div>
-          <div className="mt-4 overflow-auto">
-            <table className="w-full min-w-[780px] text-left">
-              <thead>
-                <tr className="border-b border-slate-100">
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Filename</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Status</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Stage</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Progress</th>
-                </tr>
-              </thead>
-              <tbody>
-                {documents.slice(0, 20).map((doc) => (
-                  <tr key={doc.id} className="border-b border-slate-50">
-                    <td className="py-2 pr-3 text-sm font-medium text-slate-800">{doc.filename}</td>
-                    <td className="py-2 pr-3 text-sm">
-                      <Badge className={doc.status === "success" ? "bg-emerald-100 text-emerald-700" : doc.status === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}>
-                        {doc.status}
-                      </Badge>
-                    </td>
-                    <td className="py-2 pr-3 text-sm text-slate-600">{doc.sub_status || "-"}</td>
-                    <td className="py-2 pr-3 text-sm text-slate-600">{doc.progress_percent ?? 0}%</td>
-                  </tr>
-                ))}
-                {documents.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="py-8 text-center text-sm font-medium text-slate-500">
-                      No documents found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
 
         <div className="grid gap-6 lg:grid-cols-2">
           <Card className="rounded-3xl border-slate-200 bg-white p-6">
@@ -665,6 +781,27 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                         </div>
                       </div>
                     )}
+                    {!!rule.extracted_metadata?.detected_criteria?.length && (
+                      <div>
+                        <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Detected Criteria (Dynamic)</p>
+                        <div className="max-h-56 space-y-2 overflow-auto rounded-xl border border-slate-200 bg-white p-3">
+                          {rule.extracted_metadata.detected_criteria.slice(0, 20).map((dc: any, idx: number) => (
+                            <div key={`dc-${idx}`} className="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1.5">
+                              <p className="text-[11px] font-bold text-slate-700">
+                                {dc.criterion_key}{" "}
+                                <span className="font-normal text-slate-500">
+                                  [{dc.bucket}] [{dc.status}]
+                                </span>
+                              </p>
+                              {!!dc.suggested_input_field && (
+                                <p className="text-[11px] text-sky-700">Suggested input: {dc.suggested_input_field}</p>
+                              )}
+                              {!!dc.evidence_quote && <p className="text-xs text-slate-600">{dc.evidence_quote}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     {!!(rule.extracted_metadata?.unmapped_criteria?.length) && (
                       <Card className="rounded-2xl border-violet-200 bg-violet-50 px-3 py-2">
                         <p className="text-xs font-semibold text-violet-700">
@@ -695,13 +832,45 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                 <p className="font-semibold text-slate-800">Evaluated: {latestSummary.evaluated}</p>
                 <p className="font-semibold text-slate-800">Decisions Saved: {latestSummary.decisions_saved}</p>
                 <div className="grid grid-cols-2 gap-2">
-                  {Object.entries(latestSummary.counts || {}).map(([key, value]) => (
+                  {Object.entries(
+                    (latestSummary.bucket_counts && Object.keys(latestSummary.bucket_counts).length > 0)
+                      ? latestSummary.bucket_counts
+                      : latestSummary.counts || {},
+                  ).map(([key, value]) => (
                     <Card key={key} className="rounded-2xl border-slate-100 bg-slate-50 px-3 py-2">
-                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">{key}</p>
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+                        {bucketLabel[key] || key}
+                      </p>
                       <p className="text-lg font-black text-slate-900">{value}</p>
                     </Card>
                   ))}
                 </div>
+                <Card className="rounded-2xl border-sky-200 bg-sky-50 px-3 py-2">
+                  <p className="text-xs font-semibold text-sky-700">
+                    {latestSummary.evaluation_basis?.message ||
+                      "Decision buckets are based on mapped criteria available in the master dataset."}
+                  </p>
+                  <p className="mt-1 text-[11px] text-sky-700">
+                    Include fields used:{" "}
+                    {(latestSummary.evaluation_basis?.executable_include_fields || []).join(", ") || "none"}
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-sky-700">
+                    Exclude fields used:{" "}
+                    {(latestSummary.evaluation_basis?.executable_exclude_fields || []).join(", ") || "none"}
+                  </p>
+                  {!!latestSummary.evaluation_basis?.unmapped_criteria?.length && (
+                    <p className="mt-0.5 text-[11px] text-sky-700">
+                      Unmapped policy criteria (lead to review where critical):{" "}
+                      {latestSummary.evaluation_basis.unmapped_criteria.join(", ")}
+                    </p>
+                  )}
+                  {!!latestSummary.evaluation_basis?.no_population_found && (
+                    <p className="mt-1 text-[11px] font-semibold text-rose-700">
+                      {latestSummary.evaluation_basis?.no_population_reason ||
+                        "No citizens found for the selected scheme in the current dataset."}
+                    </p>
+                  )}
+                </Card>
               </div>
             ) : (
               <p className="mt-3 text-sm text-slate-500">Run evaluation to see summary counts.</p>
@@ -723,8 +892,12 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Citizen Name</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Citizen Scheme</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Decision</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Bucket</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Confidence</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Reason</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">LLM Checked Fields</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Decision Basis (DB Values)</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Manual Inputs</th>
                 </tr>
               </thead>
               <tbody>
@@ -736,13 +909,36 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                     <td className="py-2 pr-3 text-sm">
                       <Badge className={decisionColor[row.decision] || "bg-slate-100 text-slate-700"}>{row.decision}</Badge>
                     </td>
+                    <td className="py-2 pr-3 text-sm text-slate-700">{bucketLabel[row.decision_bucket || ""] || row.decision_bucket || "-"}</td>
                     <td className="py-2 pr-3 text-sm text-slate-700">{Math.round((row.decision_confidence || 0) * 100)}%</td>
                     <td className="py-2 pr-3 text-sm text-slate-700">{row.reason}</td>
+                    <td className="py-2 pr-3 text-xs text-slate-600">{(row.evidence_json?.checked_fields || []).join(", ") || "-"}</td>
+                    <td className="py-2 pr-3 text-xs text-slate-600">{buildDecisionBasis(row)}</td>
+                    <td className="py-2 pr-3 text-xs text-slate-600">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 rounded-lg"
+                        onClick={() => {
+                          setEditingDecisionId(row.id)
+                          if (!manualInputDrafts[row.id]) {
+                            const existing = row.evidence_json?.manual_inputs || {}
+                            const initial: Record<string, string> = {}
+                            for (const f of (row.suggested_manual_fields || [])) {
+                              initial[f] = String((existing as any)?.[f] ?? "")
+                            }
+                            setManualInputDrafts((prev) => ({ ...prev, [row.id]: initial }))
+                          }
+                        }}
+                      >
+                        {editingDecisionId === row.id ? "Close" : "Edit"}
+                      </Button>
+                    </td>
                   </tr>
                 ))}
                 {decisions.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-sm font-medium text-slate-500">
+                    <td colSpan={10} className="py-8 text-center text-sm font-medium text-slate-500">
                       No decisions yet. Run an evaluation to populate this table.
                     </td>
                   </tr>
@@ -751,6 +947,120 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
             </table>
           </div>
         </Card>
+
+        <Card className="rounded-3xl border-slate-200 bg-white p-6">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Document Processing Status</p>
+            <p className="text-xs font-semibold text-slate-500">{documents.length} documents</p>
+          </div>
+          <div className="mt-4 overflow-auto">
+            <table className="w-full min-w-[780px] text-left">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Filename</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Status</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Stage</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Progress</th>
+                </tr>
+              </thead>
+              <tbody>
+                {documents.slice(0, 20).map((doc) => (
+                  <tr key={doc.id} className="border-b border-slate-50">
+                    <td className="py-2 pr-3 text-sm font-medium text-slate-800">{doc.filename}</td>
+                    <td className="py-2 pr-3 text-sm">
+                      <Badge className={doc.status === "success" ? "bg-emerald-100 text-emerald-700" : doc.status === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}>
+                        {doc.status}
+                      </Badge>
+                    </td>
+                    <td className="py-2 pr-3 text-sm text-slate-600">{doc.sub_status || "-"}</td>
+                    <td className="py-2 pr-3 text-sm text-slate-600">{doc.progress_percent ?? 0}%</td>
+                  </tr>
+                ))}
+                {documents.length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="py-8 text-center text-sm font-medium text-slate-500">
+                      No documents found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+        <Dialog open={!!activeEditingRow} onOpenChange={(open) => { if (!open) setEditingDecisionId(null) }}>
+          <DialogContent className="max-w-3xl rounded-2xl">
+            <DialogHeader>
+              <DialogTitle>Manual Inputs For Eligibility Re-judgement</DialogTitle>
+              <DialogDescription>
+                Suggested fields are generated from missing required fields and unmapped criteria for this citizen/rule.
+              </DialogDescription>
+            </DialogHeader>
+            {activeEditingRow && (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                  <p><span className="font-semibold">UID:</span> {activeEditingRow.citizen_uid}</p>
+                  <p><span className="font-semibold">Current Decision:</span> {activeEditingRow.decision_bucket || activeEditingRow.decision}</p>
+                  <p className="mt-1"><span className="font-semibold">Reason:</span> {activeEditingRow.reason}</p>
+                </div>
+                <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800">
+                  <p className="font-semibold">Suggested inputs by system:</p>
+                  <p className="mt-1">
+                    {activeSuggestedFields.join(", ") || "No missing essential fields detected from current mapped rules."}
+                  </p>
+                </div>
+                {(activeRemainingMissingFields.length > 0 || activeRemainingUnmapped.length > 0) && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                    <p className="font-semibold">Remaining unresolved criteria after latest judgement:</p>
+                    {activeRemainingMissingFields.length > 0 && (
+                      <p className="mt-1">
+                        Missing required fields: {activeRemainingMissingFields.join(", ")}
+                      </p>
+                    )}
+                    {activeRemainingUnmapped.length > 0 && (
+                      <p className="mt-1">
+                        Unresolved policy criteria: {activeRemainingUnmapped.join(", ")}
+                      </p>
+                    )}
+                  </div>
+                )}
+                {activeSuggestedFields.length > 0 ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    {activeSuggestedFields.map((f) => (
+                    <Input
+                      key={`${activeEditingRow.id}-${f}`}
+                      value={manualInputDrafts[activeEditingRow.id]?.[f] ?? ""}
+                      onChange={(e) =>
+                        setManualInputDrafts((prev) => ({
+                          ...prev,
+                          [activeEditingRow.id]: {
+                            ...(prev[activeEditingRow.id] || {}),
+                            [f]: e.target.value,
+                          },
+                        }))
+                      }
+                      placeholder={f}
+                      className="h-9 rounded-md text-xs"
+                    />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-600">
+                    No manual input required for mapped essential fields. If decision is still REVIEW_REQUIRED, it is due to unmapped policy logic that needs rule-mapping updates.
+                  </div>
+                )}
+              </div>
+            )}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setEditingDecisionId(null)}>Cancel</Button>
+              <Button
+                onClick={() => { if (activeEditingRow) void handleRejudge(activeEditingRow) }}
+                disabled={!activeEditingRow || savingManual || activeSuggestedFields.length === 0}
+              >
+                {savingManual ? "Saving..." : "Save & Re-judge"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   )

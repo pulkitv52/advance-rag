@@ -723,8 +723,8 @@ export default function App() {
       <TooltipProvider>
         {/* ── Left Sidebar: Navigation ── */}
         <nav className="w-16 flex flex-col items-center py-6 border-r border-slate-200 bg-white shrink-0 z-30">
-          <div className="w-10 h-10 rounded-xl bg-slate-900 flex items-center justify-center mb-8 shadow-lg shadow-slate-200">
-            <Zap className="text-white w-6 h-6 fill-white" />
+          <div className="mb-8 w-full flex justify-center px-1">
+            <img src="/kpmg_logo.png" alt="KPMG" className="w-12 h-auto object-contain" />
           </div>
 
           <div className="flex flex-col gap-6 flex-1">
