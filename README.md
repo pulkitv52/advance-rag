@@ -38,7 +38,7 @@ Advance-Rag is not just another RAG application. It is a unified platform design
 ## 🖼️ Platform Preview
 
 <div align="center">
-  <img src="assets/dashboard_preview.png" alt="Advance-Rag Dashboard Preview" width="90%">
+  <img src="assets/dashboard_preview.png" alt="Advance-Rag Dashboard Preview" width="100%">
   <p><i>A unified view of Knowledge Graphs and Document Intelligence</i></p>
 </div>
 
@@ -146,10 +146,10 @@ make start
 
 Deep dive into the core mechanics:
 
-- 📑 [Master Pipeline Flow](/home/pulkitv52/Advance-rag/docs/MASTER_PIPELINE_FLOW_DIAGRAM.md)
-- 🕸️ [Knowledge Graph Guide](/home/pulkitv52/Advance-rag/docs/KNOWLEDGE_GRAPH_GUIDE.md)
-- 🎯 [Fraud Intelligence Presentation](/home/pulkitv52/Advance-rag/docs/KG_FRAUD_INTELLIGENCE_PRESENTATION_GUIDE.md)
-- 📝 [Eligibility Layman Brief](/home/pulkitv52/Advance-rag/docs/USE_CASE_3_LAYMAN_BRIEF.md)
+- 📑 [Master Pipeline Flow](docs/MASTER_PIPELINE_FLOW_DIAGRAM.md)
+- 🕸️ [Knowledge Graph Guide](docs/KNOWLEDGE_GRAPH_GUIDE.md)
+- 🎯 [Fraud Intelligence Presentation](docs/KG_FRAUD_INTELLIGENCE_PRESENTATION_GUIDE.md)
+- 📝 [Eligibility Layman Brief](docs/USE_CASE_3_LAYMAN_BRIEF.md)
 
 ---
 
