@@ -1,66 +1,74 @@
-# Advance-Rag
+<div align="center">
+  <img src="assets/banner.png" alt="Advance-Rag Banner" width="100%">
 
-Advance-Rag is a full-stack intelligence platform that combines document RAG, a Neo4j knowledge graph, a Unified Social Registry fraud-intelligence workflow, and policy-based eligibility evaluation.
+  # 🚀 Advance-Rag
 
-In simple terms, the system does two big jobs:
+  **Full-stack Intelligence Platform combining Document RAG, Neo4j Knowledge Graphs, and Fraud-Intelligence Workflows.**
 
-- it lets users upload documents and ask grounded research questions over them
-- it turns structured welfare registry data into a connected graph for fraud detection, explainability, and audit prioritization
+  [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+  [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+  [![NVIDIA NIM](https://img.shields.io/badge/AI-NVIDIA%20NIM-green.svg)](https://www.nvidia.com/en-us/ai-data-science/generative-ai/nim/)
+  [![Neo4j](https://img.shields.io/badge/Graph-Neo4j-008CC1.svg)](https://neo4j.com/)
 
-## What This Project Solves
+  [Features](#-key-features) • [Architecture](#-architecture) • [Quick Start](#-quick-start) • [Documentation](#-documentation)
+</div>
 
-Most systems handle these problems separately:
+---
 
-- document search lives in one tool
-- fraud review lives in dashboards and spreadsheets
-- policy eligibility logic lives in PDFs and manual interpretation
+## 📖 Overview
 
-Advance-Rag brings them together into one application so teams can:
+Advance-Rag is not just another RAG application. It is a unified platform designed to solve complex intelligence problems by bridging the gap between **unstructured documents** and **structured registry data**.
 
-- ingest documents and query them with citations
-- build a document graph from extracted entities and relationships
-- sync social-registry data into a fraud-intelligence graph
-- detect duplicate, ghost, and anomaly patterns across connected records
-- extract eligibility criteria from policy documents
-- evaluate citizens against structured inclusion and exclusion rules
+> [!IMPORTANT]
+> The system enables teams to ask grounded research questions over PDFs while simultaneously detecting fraud patterns, ghosts, and anomalies in connected citizen records.
 
-## Main Product Areas
+---
 
-- `Research Chat`
-  Grounded Q&A over uploaded documents using chunking, embeddings, reranking, and answer generation.
+## ✨ Key Features
 
-- `Knowledge Map`
-  Graph visualization over both document-extracted entities and the USR fraud-intelligence graph.
+| Feature | Description | Tech |
+| :--- | :--- | :--- |
+| **🔍 Research Chat** | Grounded Q&A with precise citations over uploaded document sets. | Qdrant, NVIDIA NIM |
+| **🕸️ Knowledge Map** | Visual exploration of document entities and registry relationships. | Neo4j, React-Force-Graph |
+| **📊 Social Registry** | Dashboard for fraud detection, audit prioritization, and risk clusters. | Postgres, FastAPI |
+| **⚖️ Eligibility Studio** | Automated extraction of policy rules and citizen evaluation. | LLM, Document Parsing |
 
-- `Social Registry Dashboard`
-  Registry-wide fraud, anomaly, risk, audit, and operator-intelligence views.
+---
 
-- `Eligibility Studio`
-  PDF-to-rule extraction plus citizen-level eligibility evaluation.
+## 🖼️ Platform Preview
 
-## High-Level Architecture
+<div align="center">
+  <img src="assets/dashboard_preview.png" alt="Advance-Rag Dashboard Preview" width="90%">
+  <p><i>A unified view of Knowledge Graphs and Document Intelligence</i></p>
+</div>
+
+---
+
+## 🏗️ Architecture
+
+The platform follows a modern microservices architecture powered by the NVIDIA AI stack.
 
 ```mermaid
-flowchart LR
-  subgraph UI[Frontend]
+flowchart TB
+  subgraph UI[Frontend - React/Vite]
     F1[Research Chat]
     F2[Knowledge Map]
-    F3[Social Registry Dashboard]
+    F3[Social Registry]
     F4[Eligibility Studio]
   end
 
-  subgraph API[FastAPI Backend]
-    B1[Document APIs]
-    B2[Query APIs]
-    B3[USR APIs]
-    B4[Eligibility APIs]
+  subgraph API[Backend - FastAPI]
+    B1[Document Engine]
+    B2[Query Engine]
+    B3[Graph Sync Service]
+    B4[Eligibility Engine]
   end
 
-  subgraph AI[AI Services]
-    A1[NVIDIA NIM Parser]
-    A2[NVIDIA Embeddings]
-    A3[NVIDIA Reranker]
-    A4[NVIDIA LLM]
+  subgraph AI[AI Stack - NVIDIA NIM]
+    A1[Parser]
+    A2[Embeddings]
+    A3[Reranker]
+    A4[LLM]
   end
 
   subgraph Data[Data Layer]
@@ -71,363 +79,80 @@ flowchart LR
     D5[(Redis)]
   end
 
-  F1 --> B2
-  F2 --> B1
-  F2 --> B3
-  F3 --> B3
-  F4 --> B4
-
-  B1 --> A1
-  B1 --> A2
-  B1 --> D2
-  B1 --> D3
-  B1 --> D4
-
-  B2 --> A3
-  B2 --> A4
-  B2 --> D2
-  B2 --> D3
-
-  B3 --> D1
-  B3 --> D3
-
-  B4 --> A4
-  B4 --> D1
-
+  F1 & F2 & F3 & F4 --> API
+  B1 & B2 & B4 --> AI
+  B1 & B2 & B3 & B4 --> Data
   API --> D5
 ```
 
-## Two Core Pipelines
+---
 
-This repo has two different but connected intelligence pipelines.
+## 🚀 Quick Start
 
-### 1. Document Research Pipeline
+<details>
+<summary><b>1. Prerequisites</b></summary>
 
-Used when a user uploads PDFs or other supported files and asks research questions.
+- Python 3.12+ & `uv`
+- Node.js 18+ & `pnpm`
+- Docker + Docker Compose
+- NVIDIA NIM API Key ([NemoRetriever OCR](https://build.nvidia.com/nvidia/nemoretriever-ocr-v1))
+</details>
 
-```mermaid
-flowchart LR
-  U1[Upload Document] --> P1[Parse Document]
-  P1 --> P2[Extract Elements and Chunks]
-  P2 --> P3[Create Embeddings]
-  P3 --> Q1[Store in Qdrant]
-  P2 --> G1[Extract Entity Triplets]
-  G1 --> G2[Store Document Graph in Neo4j]
-  Q1 --> R1[Retrieve Relevant Chunks]
-  G2 --> R2[Retrieve Graph Context]
-  R1 --> A1[Generate Grounded Answer]
-  R2 --> A1
+<details>
+<summary><b>2. Environment Setup</b></summary>
+
+```bash
+# Copy template
+cp .env.example .env
+
+# Configure your keys in .env
+# NVIDIA_API_KEY=your_key_here
 ```
+</details>
 
-### 2. Unified Social Registry Fraud-Intelligence Pipeline
+<details>
+<summary><b>3. Launching the App</b></summary>
 
-Used when social-registry data is synced from a configured registry source into Neo4j.
+```bash
+# Install everything
+make setup
 
-```mermaid
-flowchart LR
-  S1[Registry Source Tables] --> S2[Graph Sync Service]
-  S2 --> S3[Citizen Nodes by uid]
-  S2 --> S4[Geography and Scheme Links]
-  S2 --> S5[Identity Hubs<br/>Ration Card, Mobile, Address, Operator]
-  S3 --> F1[Fraud Edge Creation]
-  S4 --> F1
-  S5 --> F1
-  F1 --> F2[POTENTIAL_DUPLICATE]
-  F1 --> F3[SAME_DOB_AT_GP]
-  F1 --> F4[FLAGGED_AS]
-  F1 --> F5[HIGH_RISK_CLUSTER]
-  F2 --> O1[Social Registry Dashboard]
-  F3 --> O1
-  F4 --> O1
-  F5 --> O1
-  F2 --> O2[Knowledge Map]
-  F3 --> O2
-  F4 --> O2
+# Start the full stack
+make start
 ```
+</details>
 
-## Tech Stack
+### 🌐 Default Endpoints
 
-- Backend: Python, FastAPI, SQLModel, asyncpg, uv
-- Frontend: React, TypeScript, Vite, shadcn/ui, pnpm
-- Databases: Postgres, Qdrant, Neo4j, Redis
-- Object storage: Minio
-- AI stack: NVIDIA NIM parser, embeddings, reranker, and LLM models
-- Infra: Docker Compose
+- **Frontend**: [http://localhost:5177](http://localhost:5177)
+- **API Docs**: [http://localhost:8081/docs](http://localhost:8081/docs)
+- **Neo4j Console**: [http://localhost:7474](http://localhost:7474)
 
-## Repository Layout
+---
+
+## 🛠️ Project Structure
 
 ```text
-backend/     FastAPI app, services, routers, tests, utility scripts
-frontend/    React/Vite application
-docs/        Architecture, graph, and product documentation
-logs/        Local runtime logs
-plan/        Design notes and execution plans
-docker-compose.yml
-Makefile
-.env.example
+├── backend/          # FastAPI, UV, SQLModel
+├── frontend/         # React, Vite, shadcn/ui
+├── docs/             # Technical deep-dives
+├── assets/           # Visual media and banners
+└── infra/            # Docker configurations
 ```
 
-## Important Data Concepts
+---
 
-### Document Knowledge Graph
+## 📚 Documentation
 
-The document graph is built from entity triplets extracted from uploaded documents.
+Deep dive into the core mechanics:
 
-- nodes are generic entities like `Person`, `Organization`, `Location`, `Event`, `Concept`
-- edges are stored as `:RELATED`
-- this graph helps multi-hop RAG and visual knowledge exploration
+- 📑 [Master Pipeline Flow](/home/pulkitv52/Advance-rag/docs/MASTER_PIPELINE_FLOW_DIAGRAM.md)
+- 🕸️ [Knowledge Graph Guide](/home/pulkitv52/Advance-rag/docs/KNOWLEDGE_GRAPH_GUIDE.md)
+- 🎯 [Fraud Intelligence Presentation](/home/pulkitv52/Advance-rag/docs/KG_FRAUD_INTELLIGENCE_PRESENTATION_GUIDE.md)
+- 📝 [Eligibility Layman Brief](/home/pulkitv52/Advance-rag/docs/USE_CASE_3_LAYMAN_BRIEF.md)
 
-### USR Fraud-Intelligence Graph
+---
 
-The registry graph is built from structured citizen data and modeled around:
-
-- `Citizen`
-- `District`
-- `Block`
-- `GP`
-- `Scheme`
-- `RationCard`
-- `Mobile`
-- `Address`
-- `Operator`
-- `FraudFlag`
-
-Key relationships include:
-
-- `RESIDES_IN`
-- `PART_OF`
-- `ENROLLED_IN`
-- `MEMBER_OF`
-- `HAS_MOBILE`
-- `REGISTERED_BY`
-- `LIVES_AT`
-- `POTENTIAL_DUPLICATE`
-- `SAME_DOB_AT_GP`
-- `FLAGGED_AS`
-- `HIGH_RISK_CLUSTER`
-
-## Identity and De-duplication Model
-
-The current system treats `uid` as the canonical citizen key during graph sync.
-
-- one `Citizen` node is created per `uid`
-- repeated source rows with the same `uid` merge into the same graph citizen
-- different `uid` values are not auto-merged into one citizen node
-
-Instead, suspicious duplication is represented as graph evidence:
-
-- `POTENTIAL_DUPLICATE`
-  created for suspicious duplicate pairs
-
-- `SAME_DOB_AT_GP`
-  created for same-DOB cluster behavior at the GP level
-
-- `FLAGGED_AS`
-  used for ghost, anomaly, and data-quality flags
-
-This is important: the graph preserves traceability. It flags suspicious identity overlap instead of silently collapsing people together.
-
-## Eligibility Workflow
-
-Eligibility Studio supports a policy-to-decision flow:
-
-1. upload a scheme document
-2. parse and extract eligibility metadata
-3. store inclusion and exclusion conditions
-4. evaluate registry citizens against those rules
-5. mark outcomes such as eligible, ineligible, or review required
-
-This gives the project both intelligence and actionability:
-
-- the graph explains suspicious cases
-- the eligibility engine explains benefit decisions
-
-## Local Development Setup
-
-### Prerequisites
-
-- Python 3.12+
-- Node.js 18+
-- Docker + Docker Compose
-- `uv`
-- `pnpm`
-- NVIDIA NIM API key
-
-### Environment
-
-Copy the template:
-
-```bash
-cp .env.example .env
-```
-
-Then fill in required values, especially:
-
-- `NVIDIA_API_KEY`
-- any password overrides you want for local infra
-- port overrides if your machine is already using defaults
-
-Note:
-
-- root `.env` is for the main local app stack
-- `frontend/.env` can be used for frontend-specific overrides when needed
-
-## Running the Project
-
-### Install Dependencies
-
-```bash
-make setup
-```
-
-### Start Infrastructure Only
-
-```bash
-make up
-```
-
-### Start the Main Local Development Stack
-
-```bash
-make start
-```
-
-### Stop Everything
-
-```bash
-make stop
-```
-
-## Common Commands
-
-Infrastructure:
-
-```bash
-make up
-make down
-make nuke
-make ps
-make health
-```
-
-Backend:
-
-```bash
-make backend-setup
-make backend-start
-make backend-stop
-make logs-backend
-```
-
-Frontend:
-
-```bash
-make frontend-setup
-make frontend-start
-make frontend-stop
-make frontend-preview
-make logs-frontend
-```
-
-Full app:
-
-```bash
-make setup
-make start
-make stop
-make restart
-make logs
-```
-
-## Default Local Endpoints
-
-In the current Makefile-based local flow:
-
-- Frontend: `http://127.0.0.1:5177`
-- Backend API: `http://127.0.0.1:8081`
-- Backend OpenAPI docs: `http://127.0.0.1:8081/docs`
-- Neo4j Browser: `http://127.0.0.1:7474`
-- Minio Console: `http://127.0.0.1:9091`
-- Qdrant: `http://127.0.0.1:6343`
-- Postgres: `127.0.0.1:5434`
-
-## Key Backend Areas
-
-- `backend/src/routers/documents.py`
-  document upload, graph retrieval, deletion
-
-- `backend/src/routers/query.py`
-  research query flow and graph-enriched answering
-
-- `backend/src/routers/usr.py`
-  social-registry APIs, graph stats, audit and fraud endpoints
-
-- `backend/src/routers/eligibility.py`
-  rule extraction and eligibility evaluation APIs
-
-- `backend/src/services/graph_sync.py`
-  registry-to-Neo4j sync plus fraud-edge creation
-
-- `backend/src/services/graph_db.py`
-  graph retrieval, graph context search, and citizen graph snapshots
-
-- `backend/src/services/eligibility.py`
-  extracted-rule interpretation and decision logic
-
-## Key Frontend Areas
-
-- `frontend/src/App.tsx`
-  main workspace shell, research chat, knowledge map
-
-- `frontend/src/components/UsrDashboard.tsx`
-  fraud-intelligence and audit dashboard
-
-- `frontend/src/components/EligibilityStudio.tsx`
-  eligibility workflow UI
-
-## Testing and Validation
-
-Backend tests:
-
-```bash
-cd backend
-uv run pytest -s
-```
-
-Frontend production build:
-
-```bash
-cd frontend
-pnpm build
-```
-
-Backend formatting:
-
-```bash
-cd backend
-uv run black src tests
-uv run isort src tests
-```
-
-## Documentation
-
-Useful deeper references in [`docs/`](/home/pulkitv52/Advance-rag/docs):
-
-- [MASTER_PIPELINE_FLOW_DIAGRAM.md](/home/pulkitv52/Advance-rag/docs/MASTER_PIPELINE_FLOW_DIAGRAM.md)
-- [KNOWLEDGE_GRAPH_GUIDE.md](/home/pulkitv52/Advance-rag/docs/KNOWLEDGE_GRAPH_GUIDE.md)
-- [KG_FRAUD_INTELLIGENCE_PRESENTATION_GUIDE.md](/home/pulkitv52/Advance-rag/docs/KG_FRAUD_INTELLIGENCE_PRESENTATION_GUIDE.md)
-- [USE_CASE_3_LAYMAN_BRIEF.md](/home/pulkitv52/Advance-rag/docs/USE_CASE_3_LAYMAN_BRIEF.md)
-
-## Current Reality
-
-This repo is not just a generic RAG app.
-
-It is a combined platform for:
-
-- document intelligence
-- graph intelligence
-- fraud detection support
-- explainability
-- eligibility automation
-
-That combination is what makes Advance-Rag valuable, and the README should help a new engineer or reviewer understand that quickly.
+<div align="center">
+  <p>Built for scale and intelligence. Optimized for NVIDIA NIM.</p>
+</div>
