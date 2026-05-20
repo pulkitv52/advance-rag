@@ -173,6 +173,21 @@ Target USR visualization semantics:
 
 ---
 
+### Scheme Browser Mode
+
+The frontend Knowledge Map now supports two distinct USR viewing modes:
+
+- **Overview mode**: a curated citizen-first graph slice for readability
+- **Scheme browser mode**: a searchable list of all Neo4j `Scheme` nodes; clicking a scheme loads that scheme's focused neighborhood
+
+This matters because the map is intentionally **not** a full-node renderer. Even when Neo4j contains sampled or full scheme coverage, the default force graph only returns a bounded relational slice for performance. The scheme browser is the supported way to inspect one scheme's linked citizens cleanly.
+
+Backend support:
+- `GET /documents/graph/all?scheme_id=S767`
+- `GET /documents/graph/schemes`
+
+---
+
 ### Implementation Status
 
 As of April 20, 2026:

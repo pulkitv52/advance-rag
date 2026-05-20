@@ -1,4 +1,4 @@
-﻿"""Query / RAG inference router."""
+"""Query / RAG inference router."""
 
 import io
 import re
@@ -25,6 +25,7 @@ class QueryRequest(BaseModel):
     top_k: int = 10
     document_ids: Optional[list[str]] = None
     stream: bool = False
+    history: Optional[list[dict[str, str]]] = None
 
 
 class QueryResponse(BaseModel):
@@ -109,6 +110,16 @@ def _extract_possible_person_name(query: str) -> str | None:
     m = re.search(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", q)
     if m:
         return m.group(1).strip()
+    return None
+
+
+def _extract_scheme_id(query: str) -> str | None:
+    """
+    Extract scheme ID like S767, S123, M999 from query text.
+    """
+    m = re.search(r"\b([A-Z]\d{3,5})\b", query.upper())
+    if m:
+        return m.group(1)
     return None
 
 
@@ -350,12 +361,30 @@ async def query_documents(
 
     graph_context = ""
     graph_enrichment_used = False
+
+    # True Hybrid RAG: Inject Knowledge Graph database results directly into the context
+    scheme_id = _extract_scheme_id(request.query)
+    if scheme_id:
+        try:
+            scheme_citizens = await graph_db.get_usr_citizens_by_scheme(scheme_id, limit=50)
+            if scheme_citizens:
+                lines = [f"### Live Database Records (Citizens enrolled in Scheme {scheme_id}):"]
+                for i, c in enumerate(scheme_citizens, start=1):
+                    loc = f"{c.get('gp') or 'N/A'}, {c.get('block') or 'N/A'}, {c.get('district') or 'N/A'}"
+                    lines.append(f"{i}. Name: {c.get('name')}, UID: {c.get('uid')}, Location: {loc}")
+                
+                graph_context += "\n" + "\n".join(lines) + "\n"
+                graph_enrichment_used = True
+                logger.info(f"[HYBRID RAG] Injected {len(scheme_citizens)} DB records for scheme {scheme_id}")
+        except Exception as e:
+            logger.warning(f"Scheme hybrid injection failed: {e}")
+
     try:
         entities = await extractor.extract_entities_from_query(request.query)
         if entities:
             facts = await graph_db.search_multi_hop_context(entities, request.document_ids)
             if facts:
-                graph_context = (
+                graph_context += (
                     "\n### Relational Intelligence (Deep Graph Analysis):\n" + "\n".join(facts)
                 )
                 graph_enrichment_used = True
@@ -384,6 +413,7 @@ async def query_documents(
         query=enriched_query,
         context_chunks=chunks,
         stream=False,
+        history=request.history,
     )
     generate_time = time.perf_counter() - t0
     logger.info(f"[3/3] [NIM-LLM] Generated grounded answer in {generate_time:.2f}s")
@@ -454,6 +484,7 @@ async def stream_query(
         query=request.query,
         context_chunks=chunks,
         stream=True,
+        history=request.history,
     )
 
     async def event_generator():

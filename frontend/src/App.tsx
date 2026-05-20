@@ -1,19 +1,15 @@
-import React, { useState, useRef, useEffect, DragEvent, ChangeEvent } from 'react'
+import React, { useState, useRef, useEffect, ChangeEvent } from 'react'
 import {
   Search,
   Loader2,
-  CheckCircle,
   XCircle,
   Zap,
   Network,
-  LayoutDashboard,
   FileText,
   Settings,
-  Database,
   Info,
   ExternalLink,
   Plus,
-  Trash2
 } from 'lucide-react'
 import ForceGraph2D from 'react-force-graph-2d'
 import axios from 'axios'
@@ -103,7 +99,6 @@ import { Input } from "./components/ui/input"
 import { Card } from "./components/ui/card"
 import { ScrollArea } from "./components/ui/scroll-area"
 import { Badge } from "./components/ui/badge"
-import { Checkbox } from "./components/ui/checkbox"
 import { Separator } from "./components/ui/separator"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs"
 import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar"
@@ -159,6 +154,36 @@ interface SavedReport {
   filename: string
   format: string
   created_at: string
+}
+
+interface SchemeOption {
+  id: string
+  name: string
+  citizen_count: number
+  enrollment_count: number
+}
+
+interface GraphNode {
+  id: string
+  label: string
+  type: string
+  x?: number
+  y?: number
+  fx?: number
+  fy?: number
+  [key: string]: any
+}
+
+interface GraphLink {
+  source: string | { id: string }
+  target: string | { id: string }
+  label: string
+  description?: string
+}
+
+interface GraphData {
+  nodes: GraphNode[]
+  links: GraphLink[]
 }
 
 interface SaveFilePickerOptions {
@@ -269,15 +294,89 @@ const resolveEntityColor = (type: string, label: string = '') => {
   return ENTITY_COLORS[category] || ENTITY_COLORS.Default;
 }
 
+const getLinkNodeId = (value: string | { id: string }) => (
+  typeof value === 'string' ? value : value?.id
+)
+
+const applySchemeFocusedLayout = (
+  nodes: GraphNode[],
+  links: GraphLink[],
+  activeSchemeId: string
+): GraphNode[] => {
+  if (!activeSchemeId) {
+    // If no scheme selected, unfreeze all nodes to allow organic global layout
+    nodes.forEach(node => {
+      delete node.fx;
+      delete node.fy;
+    });
+    return nodes;
+  }
+
+  const schemeNode = nodes.find((node) => node.id === activeSchemeId)
+  if (!schemeNode) return nodes
+
+  const citizenIds = new Set(
+    links
+      .filter((link) => link.label === 'ENROLLED_IN' && getLinkNodeId(link.target) === activeSchemeId)
+      .map((link) => getLinkNodeId(link.source))
+      .filter(Boolean) as string[]
+  )
+
+  const contextualIds = new Set<string>()
+  links.forEach((link) => {
+    const sourceId = getLinkNodeId(link.source)
+    const targetId = getLinkNodeId(link.target)
+    if (citizenIds.has(sourceId) && targetId !== activeSchemeId) contextualIds.add(targetId)
+    if (citizenIds.has(targetId) && sourceId !== activeSchemeId) contextualIds.add(sourceId)
+  })
+
+  // Instead of a rigid ring, we spread them in an organic disk/spiral to give them breathing room
+  const placeInSpiral = (
+    groupNodes: GraphNode[],
+    baseRadius: number,
+  ) => {
+    groupNodes.forEach((node, index) => {
+      // Increase radius organically for large groups to prevent overlap
+      const radius = baseRadius + (index * 0.4); 
+      const angle = index * 2.4; // Golden ratio spread
+      
+      // Set initial positions but remove rigid fx/fy constraints 
+      // so D3 force simulation can elegantly untangle them
+      node.x = Math.cos(angle) * radius
+      node.y = Math.sin(angle) * radius
+      delete node.fx
+      delete node.fy
+    })
+  }
+
+  // Anchor the scheme tightly in the center
+  schemeNode.fx = 0
+  schemeNode.fy = 0
+  schemeNode.x = 0
+  schemeNode.y = 0
+
+  const citizenNodes = nodes.filter((node) => citizenIds.has(node.id))
+  const contextNodes = nodes.filter(
+    (node) => node.id !== activeSchemeId && !citizenIds.has(node.id) && contextualIds.has(node.id)
+  )
+  const remainingNodes = nodes.filter(
+    (node) => node.id !== activeSchemeId && !citizenIds.has(node.id) && !contextualIds.has(node.id)
+  )
+
+  placeInSpiral(citizenNodes, 120)
+  placeInSpiral(contextNodes, 350)
+  placeInSpiral(remainingNodes, 550)
+
+  return nodes
+}
+
 export default function App() {
-  const [documents, setDocuments] = useState<Document[]>([])
+  const [, setDocuments] = useState<Document[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [selectedProjectId, setSelectedProjectId] = useState<string>('')
-  const [savedAnalyses, setSavedAnalyses] = useState<QueryResult[]>([])
-  const [reportHistory, setReportHistory] = useState<SavedReport[]>([])
+  const [, setSavedAnalyses] = useState<QueryResult[]>([])
+  const [, setReportHistory] = useState<SavedReport[]>([])
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [uploading, setUploading] = useState(false)
-  const [dragOver, setDragOver] = useState(false)
   const [query, setQuery] = useState('');
   const [activeTab, setActiveTab] = useState('research');
   const [querying, setQuerying] = useState(false);
@@ -285,14 +384,19 @@ export default function App() {
   const [result, setResult] = useState<QueryResult | null>(null)
   const [selectedSource, setSelectedSource] = useState<Source | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [chatHistory, setChatHistory] = useState<{role: string, content: string}[]>([])
 
   // Graph States
-  const [graphData, setGraphData] = useState({ nodes: [], links: [] })
+  const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] })
+  const [schemeGraphId, setSchemeGraphId] = useState('')
+  const [schemeSearch, setSchemeSearch] = useState('')
+  const [schemeOptions, setSchemeOptions] = useState<SchemeOption[]>([])
+  const [loadingSchemes, setLoadingSchemes] = useState(false)
   const [loadingGraph, setLoadingGraph] = useState(false)
   const [projectsReady, setProjectsReady] = useState(false)
 
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const mapContainerRef = useRef<HTMLDivElement>(null)
+  const graphRef = useRef<any>(null)
   const graphRequestInFlightRef = useRef(false)
 
   const [mapDimensions, setMapDimensions] = useState({ width: 800, height: 600 })
@@ -412,33 +516,6 @@ export default function App() {
     fetchReportHistory()
   }, [result?.analysis_id])
 
-  const handleFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0) return
-    if (!selectedProjectId) {
-      setError('Select a project before uploading documents.')
-      return
-    }
-    setUploading(true)
-    setError(null)
-    const form = new FormData()
-    Array.from(files).forEach(f => form.append('files', f))
-    if (selectedProjectId) {
-      form.append('project_id', selectedProjectId)
-    }
-    try {
-      const res = await axios.post(`${API}/documents/upload`, form)
-      const uploaded: any[] = res.data.documents
-      const formatted = uploaded.map(d => ({ ...d, id: d.document_id }))
-      setDocuments(prev => [...formatted, ...prev])
-      uploaded.forEach(doc => pollStatus(doc.document_id))
-      await fetchDocuments(selectedProjectId)
-    } catch (e: any) {
-      setError(e.response?.data?.detail || 'Upload failed.')
-    } finally {
-      setUploading(false)
-    }
-  }
-
   const pollStatus = async (id: string) => {
     const interval = setInterval(async () => {
       try {
@@ -446,7 +523,9 @@ export default function App() {
         const doc = res.data
         setDocuments(prev => prev.map(d => (d.id === id || (d as any).document_id === id) ? { ...d, ...doc } : d))
         if (doc.status === 'success' || doc.status === 'failed') clearInterval(interval)
-      } catch { clearInterval(interval) }
+      } catch {
+        clearInterval(interval)
+      }
     }, 2000)
   }
 
@@ -463,13 +542,6 @@ export default function App() {
       console.error('Failed to create project', err)
       setError('Failed to create project.')
     }
-  }
-
-  const handleLoadAnalysis = (analysis: QueryResult) => {
-    setResult(analysis)
-    setQuery(analysis.query)
-    setSelectedSource(null)
-    setError(null)
   }
 
   const saveCurrentAnalysis = async () => {
@@ -502,30 +574,6 @@ export default function App() {
     }
   }
 
-  const handleDownloadSavedReport = async (reportId: string) => {
-    try {
-      const response = await axios.get(`${API}/reports/${reportId}/download`, { responseType: 'blob' })
-      const blob = response.data instanceof Blob ? response.data : new Blob([response.data], { type: 'application/pdf' })
-      const url = window.URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      const disposition = response.headers['content-disposition'] || ''
-      const filenameMatch = disposition.match(/filename\*?=(?:UTF-8''|\")?([^;\"\n]+)/i)
-      const filename = filenameMatch ? decodeURIComponent(filenameMatch[1].replace(/\"/g, '').trim()) : `report-${reportId}.pdf`
-      link.href = url
-      link.download = filename
-      link.style.display = 'none'
-      document.body.appendChild(link)
-      link.click()
-      setTimeout(() => {
-        window.URL.revokeObjectURL(url)
-        link.remove()
-      }, 60000)
-    } catch (err) {
-      console.error('Failed to download saved report', err)
-      setError('Failed to download saved report.')
-    }
-  }
-
   const handleQuery = async () => {
     if (!query.trim()) return
     setQuerying(true)
@@ -536,10 +584,12 @@ export default function App() {
       const payload = {
         query,
         top_k: 10,
-        document_ids: selectedIds.size > 0 ? Array.from(selectedIds) : null
+        document_ids: selectedIds.size > 0 ? Array.from(selectedIds) : null,
+        history: chatHistory.length > 0 ? chatHistory : null
       }
       const res = await axios.post(`${API}/query/`, payload)
       setResult({ ...res.data, project_id: selectedProjectId || null })
+      setChatHistory(prev => [...prev, { role: 'user', content: query }, { role: 'assistant', content: res.data.answer }])
     } catch (e: any) {
       setError(e.response?.data?.detail || 'Query failed.')
     } finally {
@@ -547,13 +597,14 @@ export default function App() {
     }
   }
 
-  const fetchGraph = async () => {
+  const fetchGraph = async (schemeOverride?: string | null) => {
     if (graphRequestInFlightRef.current) return
 
     graphRequestInFlightRef.current = true
     setLoadingGraph(true)
     setError(null)
     try {
+      const normalizedSchemeId = (schemeOverride ?? schemeGraphId).trim().toUpperCase()
       const params = new URLSearchParams()
       if (selectedIds.size > 0) {
         params.set('ids', Array.from(selectedIds).join(','))
@@ -563,6 +614,9 @@ export default function App() {
       }
       if (query.trim()) {
         params.set('q', query.trim())
+      }
+      if (normalizedSchemeId) {
+        params.set('scheme_id', normalizedSchemeId)
       }
 
       const queryString = params.toString()
@@ -574,6 +628,9 @@ export default function App() {
         if (query.trim()) {
           fallbackParams.set('q', query.trim())
         }
+        if (normalizedSchemeId) {
+          fallbackParams.set('scheme_id', normalizedSchemeId)
+        }
         const fallbackQuery = fallbackParams.toString()
         res = await axios.get(`${API}/documents/graph/all${fallbackQuery ? `?${fallbackQuery}` : ''}`)
       }
@@ -582,8 +639,13 @@ export default function App() {
         ...node,
         type: resolveEntityCategory(node?.type || '', node?.label || node?.id || '')
       }))
+      const laidOutNodes = applySchemeFocusedLayout(
+        normalizedNodes,
+        res.data?.links || [],
+        normalizedSchemeId
+      )
       setGraphData({
-        nodes: normalizedNodes,
+        nodes: laidOutNodes,
         links: res.data?.links || []
       })
     } catch (err: any) {
@@ -595,37 +657,51 @@ export default function App() {
     }
   }
 
+  const fetchSchemeOptions = async () => {
+    setLoadingSchemes(true)
+    try {
+      const res = await axios.get(`${API}/documents/graph/schemes`)
+      setSchemeOptions(res.data?.schemes || [])
+    } catch (err) {
+      console.error('Failed to load scheme catalog', err)
+      setSchemeOptions([])
+    } finally {
+      setLoadingSchemes(false)
+    }
+  }
+
+  const handleLoadSchemeGraph = async (schemeId: string) => {
+    const normalizedSchemeId = schemeId.trim().toUpperCase()
+    setSchemeGraphId(normalizedSchemeId)
+    await fetchGraph(normalizedSchemeId)
+  }
+
+  const handleResetSchemeGraph = async () => {
+    setSchemeGraphId('')
+    await fetchGraph('')
+  }
+
 
   useEffect(() => {
     if (activeTab !== 'map' || !projectsReady) return
     fetchGraph()
+    fetchSchemeOptions()
   }, [activeTab, projectsReady, selectedProjectId])
 
-  const toggleSelect = (id: string) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
+  useEffect(() => {
+    if (!graphRef.current || activeTab !== 'map') return
 
-  const handleDeleteDocument = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation()
-    if (!confirm("Are you sure you want to permanently delete this document from all databases?")) return
+    const timer = window.setTimeout(() => {
+      if (schemeGraphId) {
+        graphRef.current.centerAt(0, 0, 800)
+        graphRef.current.zoom(1.6, 800)
+      } else {
+        graphRef.current.zoomToFit(800, 80)
+      }
+    }, 150)
 
-    try {
-      await axios.delete(`${API}/documents/${id}`)
-      setDocuments(prev => prev.filter(d => d.id !== id && (d as any).document_id !== id))
-      setSelectedIds(prev => {
-        const next = new Set(prev)
-        next.delete(id)
-        return next
-      })
-    } catch (err) {
-      setError("Failed to delete document.")
-    }
-  }
+    return () => window.clearTimeout(timer)
+  }, [graphData, schemeGraphId, activeTab])
 
   const handleExportReport = async () => {
     if (!result) return
@@ -712,181 +788,54 @@ export default function App() {
     }
   }
 
-  const getStatusIcon = (status: DocStatus) => {
-    if (status === 'success') return <CheckCircle className="w-3 h-3 text-emerald-500" />
-    if (status === 'failed') return <XCircle className="w-3 h-3 text-rose-500" />
-    return <Loader2 className="w-3 h-3 text-blue-500 animate-spin" />
-  }
+  const filteredSchemeOptions = schemeOptions.filter((scheme) => {
+    const search = schemeSearch.trim().toLowerCase()
+    if (!search) return true
+    return (
+      scheme.id.toLowerCase().includes(search)
+      || scheme.name.toLowerCase().includes(search)
+    )
+  })
 
   return (
     <div className="flex h-screen w-full bg-[#f8f9fa] text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden">
       <TooltipProvider>
         {/* ── Left Sidebar: Navigation ── */}
-        <nav className="w-16 flex flex-col items-center py-6 border-r border-slate-200 bg-white shrink-0 z-30">
-          <div className="mb-8 w-full flex justify-center px-1">
-            <img src="/kpmg_logo.png" alt="KPMG" className="w-12 h-auto object-contain" />
+        <nav className="w-48 flex flex-col py-6 border-r border-slate-200 bg-white shrink-0 z-30 px-5">
+          <div className="mb-10 w-full flex justify-center">
+            <img src="/kpmg_logo.png" alt="KPMG" className="w-20 h-auto object-contain" />
           </div>
 
-          <div className="flex flex-col gap-6 flex-1">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="w-10 h-10 rounded-xl hover:bg-slate-100">
-                  <LayoutDashboard className="w-5 h-5 text-slate-500" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">Dashboard</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="w-10 h-10 rounded-xl hover:bg-slate-100">
-                  <Database className="w-5 h-5 text-slate-500" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">Document Library</TooltipContent>
-            </Tooltip>
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="w-10 h-10 rounded-xl hover:bg-slate-100">
-                  <Network className="w-5 h-5 text-slate-500" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="right">Knowledge Map</TooltipContent>
-            </Tooltip>
+          <div className="w-full mb-6">
+            <div className="flex items-center justify-between mb-3 px-1">
+              <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">Workspace</h2>
+              <button onClick={handleCreateProject} className="text-slate-400 hover:text-slate-900 transition-colors" title="New Project">
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[11px] font-semibold text-slate-700 outline-none hover:border-slate-300 transition-colors cursor-pointer focus:ring-2 focus:ring-slate-200 focus:border-transparent">
+              <option value="" disabled>{projects.length > 0 ? "Select a project" : "Create project"}</option>
+              {projects.map(project => (
+                <option key={project.id} value={project.id}>{project.name}</option>
+              ))}
+            </select>
           </div>
 
-          <div className="mt-auto flex flex-col gap-6">
+          <div className="mt-auto w-full flex items-center justify-between px-2">
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="icon" className="w-10 h-10 rounded-xl hover:bg-slate-100">
-                  <Settings className="w-5 h-5 text-slate-500" />
-                </Button>
+                <button className="text-slate-400 hover:text-slate-900 transition-colors p-2 hover:bg-slate-100 rounded-lg">
+                  <Settings className="w-4 h-4" />
+                </button>
               </TooltipTrigger>
               <TooltipContent side="right"><p>Enterprise Settings</p></TooltipContent>
             </Tooltip>
-            <Avatar className="w-10 h-10 border-2 border-slate-100">
+            <Avatar className="w-8 h-8 ring-2 ring-slate-100">
               <AvatarImage src="https://github.com/shadcn.png" />
               <AvatarFallback>AD</AvatarFallback>
             </Avatar>
           </div>
         </nav>
-
-        {/* ── Secondary Sidebar: Documents ── */}
-        <aside className={`w-72 flex flex-col border-r border-slate-200 bg-slate-50/50 shrink-0 z-20 ${activeTab === 'registry' ? 'hidden' : 'flex'}`}>
-          <div className="p-6 shrink-0">
-            <div className="space-y-4 mb-6">
-              <div className="flex items-center justify-between gap-2">
-                <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 font-mono">Projects</h2>
-                <Button variant="ghost" size="sm" className="h-7 rounded-lg px-2 text-[10px] font-bold" onClick={handleCreateProject}>New</Button>
-              </div>
-              <select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-semibold text-slate-700 outline-none">
-                <option value="" disabled>{projects.length > 0 ? "Select a project" : "Create your first project"}</option>
-                {projects.map(project => (
-                  <option key={project.id} value={project.id}>{project.name}</option>
-                ))}
-              </select>
-              <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Workspace Scope</p>
-                <p className="mt-2 text-[11px] font-medium leading-relaxed text-slate-600">
-                  {selectedProjectId ? 'Only documents linked to the active project are visible here. New uploads are attached to this project automatically.' : 'Select or create a project for scoped documents and research. Knowledge Map can still load globally.'}
-                </p>
-              </div>
-            </div>
-            <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-2 font-mono">Project Repository</h2>
-            <p className="text-[10px] text-slate-400 mb-6 font-medium">{selectedProjectId ? 'This repository is scoped to the active project.' : 'Choose a project to view the repository for that workspace.'}</p>
-            <div
-              onDragOver={(e: DragEvent) => { e.preventDefault(); setDragOver(true) }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={(e: DragEvent) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files) }}
-              onClick={() => fileInputRef.current?.click()}
-              className={`group border-2 border-dashed rounded-2xl p-6 flex flex-col items-center gap-3 cursor-pointer transition-all bg-white hover:border-slate-300 hover:shadow-sm
-                  ${dragOver ? 'border-slate-900 bg-slate-100' : 'border-slate-200'}`}
-            >
-              <div className="w-8 h-8 rounded-full bg-slate-50 flex items-center justify-center group-hover:bg-slate-100 transition-colors">
-                <Plus className="w-4 h-4 text-slate-600" />
-              </div>
-              <div className="text-center">
-                <p className="text-[11px] font-bold text-slate-800">Add New Source</p>
-              </div>
-              {uploading && (
-                <div className="absolute inset-0 bg-white/80 rounded-2xl flex items-center justify-center backdrop-blur-[2px]">
-                  <Loader2 className="w-5 h-5 animate-spin text-slate-900" />
-                </div>
-              )}
-            </div>
-            <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e: ChangeEvent<HTMLInputElement>) => handleFiles(e.target.files)} />
-          </div>
-
-          <ScrollArea className="flex-1 px-4">
-            <div className="space-y-4 pb-12">
-              <div className="flex items-center justify-between px-2">
-                <span className="text-[10px] font-bold text-slate-400 uppercase font-mono">Project Index</span>
-                <Button variant="link" className="h-auto p-0 text-[10px] text-slate-400 hover:text-slate-900" onClick={() => setSelectedIds(new Set())}>Reset</Button>
-              </div>
-              <div className="space-y-1.5">
-                {documents.map(doc => {
-                  const isSelected = selectedIds.has(doc.id);
-                  return (
-                    <div
-                      key={doc.id}
-                      onClick={() => toggleSelect(doc.id)}
-                      className={`group/item flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all flex-1
-                          ${isSelected ? 'bg-white shadow-[0px_2px_8px_rgba(0,0,0,0.04)] border border-slate-200' : 'hover:bg-slate-100/50'}`}
-                    >
-                      <Checkbox checked={isSelected} className="rounded-md border-slate-300 data-[state=checked]:bg-slate-900" />
-                      <div className="min-w-0 flex-1">
-                        <p className={`text-[11px] font-semibold truncate ${isSelected ? 'text-slate-900' : 'text-slate-500'}`}>{doc.filename}</p>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          {getStatusIcon(doc.status)}
-                          <span className="text-[9px] font-bold text-slate-400 uppercase">{doc.status === 'processing' ? (doc.sub_status || 'analyzing') : `${doc.chunks_indexed || 0} chunks`}</span>
-                        </div>
-                      </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="w-7 h-7 rounded-lg opacity-0 group-hover/item:opacity-100 hover:bg-rose-50 hover:text-rose-500 transition-all text-slate-400"
-                        onClick={(e) => handleDeleteDocument(e, doc.id)}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
-                    </div>
-                  )
-                })}
-              </div>
-
-              <div className="space-y-4 border-t border-slate-100 pt-4">
-                <div>
-                  <p className="px-2 text-[10px] font-bold uppercase text-slate-400 font-mono mb-2">Saved Analyses</p>
-                  <div className="space-y-2">
-                    {savedAnalyses.length === 0 ? (
-                      <p className="px-2 text-[11px] text-slate-400">No saved analyses yet.</p>
-                    ) : savedAnalyses.slice(0, 6).map((analysis, index) => (
-                      <button key={analysis.analysis_id || `${analysis.query}-${index}`} onClick={() => handleLoadAnalysis(analysis)} className="w-full rounded-xl border border-slate-100 bg-white px-3 py-2 text-left hover:border-slate-200 hover:bg-slate-50 transition-colors">
-                        <p className="text-[11px] font-bold text-slate-900 truncate">{analysis.query}</p>
-                        <p className="text-[9px] font-semibold text-slate-500 mt-1">{analysis.confidence_score ? `${Math.round(analysis.confidence_score * 100)}% confidence` : 'Saved analysis'}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <p className="px-2 text-[10px] font-bold uppercase text-slate-400 font-mono mb-2">Report History</p>
-                  <div className="space-y-2">
-                    {reportHistory.length === 0 ? (
-                      <p className="px-2 text-[11px] text-slate-400">No saved reports yet.</p>
-                    ) : reportHistory.slice(0, 6).map((report) => (
-                      <button key={report.id} onClick={() => handleDownloadSavedReport(report.id)} className="w-full rounded-xl border border-slate-100 bg-white px-3 py-2 text-left hover:border-slate-200 hover:bg-slate-50 transition-colors">
-                        <p className="text-[11px] font-bold text-slate-900 truncate">{report.filename}</p>
-                        <p className="text-[9px] font-semibold text-slate-500 mt-1">{new Date(report.created_at).toLocaleString()}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </ScrollArea>
-        </aside>
 
         {/* ── Main Layout: Workspace & Intelligence ── */}
         <main className="flex-1 flex overflow-hidden">
@@ -1136,10 +1085,17 @@ export default function App() {
                 ) : (
                   <div ref={mapContainerRef} className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing">
                     <ForceGraph2D
+                      ref={graphRef}
                       graphData={graphData}
                       width={Math.max(mapDimensions.width, 900)}
                       height={Math.max(mapDimensions.height, 620)}
-                      nodeLabel={(node: any) => `${node.type}: ${node.label}`}
+                      nodeLabel={(node: any) => {
+                        let label = `${node.type}: ${node.label}`;
+                        if (node.fraud_reason) {
+                          label += `<br/><span style="color: #ef4444; font-weight: bold; font-size: 10px;">⚠️ ${node.fraud_reason}</span>`;
+                        }
+                        return label;
+                      }}
                       linkLabel={(link: any) => `${link.label}: ${link.description || ''}`}
                       nodeColor={(node: any) => resolveEntityColor(node.type || 'Default', node.label)}
                       nodeRelSize={8}
@@ -1149,6 +1105,15 @@ export default function App() {
                         const category = resolveEntityCategory(node.type || 'Default', label);
                         const color = ENTITY_COLORS[category] || ENTITY_COLORS.Default;
                         const isFraud = category === 'FraudFlag';
+                        const isSchemeFocusNode = schemeGraphId && node.id === schemeGraphId;
+                        const showLabel = schemeGraphId
+                          ? (
+                            isSchemeFocusNode
+                            || category === 'Citizen'
+                            || category === 'FraudFlag'
+                            || globalScale > 1.4
+                          )
+                          : globalScale > 0.6
 
                         ctx.font = `bold ${fontSize}px Inter`;
                         ctx.textAlign = 'center';
@@ -1160,15 +1125,15 @@ export default function App() {
 
                         ctx.fillStyle = color;
                         ctx.beginPath();
-                        const radius = (isFraud ? 12 : 7) / globalScale;
+                        const radius = (isSchemeFocusNode ? 16 : isFraud ? 12 : 7) / globalScale;
                         ctx.arc(node.x, node.y, radius, 0, 2 * Math.PI, false);
                         ctx.fill();
 
                         ctx.shadowBlur = 0; // Reset shadow
 
-                        if (globalScale > 0.6) {
+                        if (showLabel) {
                           ctx.fillStyle = '#1e293b';
-                          const offset = (isFraud ? 22 : 16) / globalScale;
+                          const offset = (isSchemeFocusNode ? 28 : isFraud ? 22 : 16) / globalScale;
                           ctx.fillText(label, (node.x as number), (node.y as number) + offset);
                         }
                       }}
@@ -1198,14 +1163,97 @@ export default function App() {
                     )}
 
                     {/* Immersive Map Controls Overlay */}
-                    <div className="absolute top-8 right-8 flex flex-col gap-2 z-10">
+                    <div className="absolute top-8 left-8 flex flex-col gap-3 z-10">
+                      <div className="w-80 rounded-[28px] border border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-[0.35em] text-slate-400">Scheme Browser</p>
+                            <p className="mt-2 text-xs font-medium text-slate-500">
+                              Pick a scheme to load its sampled citizen neighborhood.
+                            </p>
+                          </div>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="h-8 rounded-xl px-3 text-[10px] font-bold uppercase tracking-wider"
+                            onClick={() => fetchSchemeOptions()}
+                            disabled={loadingSchemes}
+                          >
+                            {loadingSchemes ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Refresh'}
+                          </Button>
+                        </div>
+
+                        <div className="mt-4 flex items-center gap-2">
+                          <Input
+                            placeholder="Search scheme"
+                            value={schemeSearch}
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => setSchemeSearch(e.target.value)}
+                            className="h-9 rounded-xl border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 shadow-none focus-visible:ring-slate-300"
+                          />
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-9 rounded-xl px-3 text-[10px] font-bold uppercase tracking-wider text-slate-500"
+                            onClick={() => handleResetSchemeGraph()}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+
+                        <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50/70 px-3 py-2">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Active View</p>
+                          <p className="mt-1 text-sm font-bold text-slate-900">
+                            {schemeGraphId ? schemeGraphId : 'Overview'}
+                          </p>
+                        </div>
+
+                        <ScrollArea className="mt-4 h-72 rounded-2xl border border-slate-100 bg-white">
+                          <div className="space-y-2 p-3">
+                            {filteredSchemeOptions.map((scheme) => {
+                              const isActive = scheme.id === schemeGraphId
+                              return (
+                                <button
+                                  key={scheme.id}
+                                  type="button"
+                                  onClick={() => handleLoadSchemeGraph(scheme.id)}
+                                  className={`w-full rounded-2xl border px-4 py-3 text-left transition-all ${
+                                    isActive
+                                      ? 'border-slate-900 bg-slate-900 text-white shadow-lg'
+                                      : 'border-slate-100 bg-slate-50 hover:border-slate-300 hover:bg-white'
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className={`text-sm font-black tracking-tight ${isActive ? 'text-white' : 'text-slate-900'}`}>
+                                      {scheme.id}
+                                    </span>
+                                    <span className={`text-[10px] font-bold uppercase tracking-[0.25em] ${isActive ? 'text-slate-300' : 'text-slate-400'}`}>
+                                      {scheme.citizen_count} citizens
+                                    </span>
+                                  </div>
+                                  <p className={`mt-1 text-xs font-medium ${isActive ? 'text-slate-200' : 'text-slate-500'}`}>
+                                    {scheme.name}
+                                  </p>
+                                  <p className={`mt-2 text-[10px] font-bold uppercase tracking-widest ${isActive ? 'text-slate-300' : 'text-slate-400'}`}>
+                                    {scheme.enrollment_count} enrollments
+                                  </p>
+                                </button>
+                              )
+                            })}
+                            {!loadingSchemes && filteredSchemeOptions.length === 0 && (
+                              <div className="rounded-2xl border border-dashed border-slate-200 px-4 py-8 text-center">
+                                <p className="text-xs font-semibold text-slate-500">No schemes match this search yet.</p>
+                              </div>
+                            )}
+                          </div>
+                        </ScrollArea>
+                      </div>
                       <Button variant="secondary" size="icon" className="bg-white/90 backdrop-blur shadow-2xl rounded-xl border-slate-100 h-10 w-10 hover:bg-white" onClick={() => fetchGraph()}>
                         <Network className="w-4 h-4 text-slate-900" />
                       </Button>
                     </div>
 
-                    <div className="absolute bottom-10 right-10 bg-white/90 backdrop-blur border border-slate-100 rounded-[32px] p-10 shadow-[0px_30px_90px_rgba(0,0,0,0.12)] space-y-4 animate-in slide-in-from-bottom-8 duration-1000 z-10 w-80">
-                      <h4 className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-400 mb-8 border-b border-slate-50 pb-4">Intelligence Legend</h4>
+                    <div className="absolute bottom-10 right-10 bg-white/90 backdrop-blur border border-slate-100 rounded-[32px] p-8 shadow-[0px_30px_90px_rgba(0,0,0,0.12)] animate-in slide-in-from-bottom-8 duration-1000 z-10 w-72">
+                      <h4 className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-400 mb-6 border-b border-slate-50 pb-4">Color Legend</h4>
                       <div className="grid grid-cols-2 gap-x-6 gap-y-5">
                         {DATABASE_ENTITY_LEGEND.map((type) => (
                           <div key={type} className="flex items-center gap-4">
@@ -1213,24 +1261,6 @@ export default function App() {
                             <span className="text-[10px] font-bold text-slate-600 uppercase tracking-tighter whitespace-nowrap">{type}</span>
                           </div>
                         ))}
-                      </div>
-
-                      <div className="mt-8 pt-6 border-t border-slate-100 space-y-4">
-                        <h5 className="text-[10px] font-bold uppercase tracking-widest text-slate-800">Fraud Typology Guide</h5>
-                        <div className="flex flex-col gap-4 text-[11px] text-slate-500">
-                          <div className="flex gap-3 items-start">
-                            <span className="font-black text-rose-500 shrink-0 w-14 uppercase tracking-tighter">Fraud 1</span>
-                            <span className="leading-snug"><strong className="text-slate-800">Ghost Flags:</strong> Invalid or suspicious beneficiary profiles flagged from citizen attributes.</span>
-                          </div>
-                          <div className="flex gap-3 items-start">
-                            <span className="font-black text-amber-500 shrink-0 w-14 uppercase tracking-tighter">Fraud 2</span>
-                            <span className="leading-snug"><strong className="text-slate-800">Identity Duplicates:</strong> Same person linked via duplicate identity patterns (B/I rules).</span>
-                          </div>
-                          <div className="flex gap-3 items-start">
-                            <span className="font-black text-violet-500 shrink-0 w-14 uppercase tracking-tighter">Fraud 3</span>
-                            <span className="leading-snug"><strong className="text-slate-800">Systemic Anomalies:</strong> Operator/household/scheme-level risk clusters requiring field audit.</span>
-                          </div>
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -1294,18 +1324,6 @@ export default function App() {
     </div>
   )
 }
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

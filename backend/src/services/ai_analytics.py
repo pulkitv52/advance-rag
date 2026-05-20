@@ -406,8 +406,13 @@ async def detect_advanced_utilization_fraud() -> Dict[str, List[Dict]]:
     h1_query = """
     MATCH (c:Citizen)
     WHERE (c.is_ghost_flag = true OR c.is_dup_flag = true)
-      AND (c.tran_count_1 > 0 OR c.tran_count_2 > 0)
-    RETURN c.name AS name, c.uid AS uid, c.tran_count_1 AS trans,
+      AND (
+        coalesce(c.transaction_rows, 0) > 0
+        OR coalesce(c.tran_count_1, 0) > 0
+        OR coalesce(c.tran_count_2, 0) > 0
+      )
+    RETURN c.name AS name, c.uid AS uid,
+           coalesce(c.transaction_rows, c.tran_count_1, 0) AS trans,
            98 AS confidence,
            'H1_GHOST_MONETIZATION' AS rule
     LIMIT 100

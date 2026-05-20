@@ -27,8 +27,40 @@ interface RuleRow {
   include_conditions: Record<string, unknown>
   exclude_conditions: Record<string, unknown>
   extracted_metadata?: Record<string, any>
+  canonical_rule?: CanonicalRule
   source_filename?: string
   created_at?: string
+}
+
+interface CanonicalCondition {
+  field: string
+  operator: string
+  value?: unknown
+  value_type?: string | null
+  evidence_quote?: string | null
+}
+
+interface UnmappedCondition {
+  requirement: string
+  suggested_input_field: string
+  input_type: "boolean" | "number" | "text" | "select"
+  reason_unmapped: string
+  evidence_quote?: string | null
+}
+
+interface CanonicalRule {
+  scheme_id: string
+  rule_name: string
+  include_conditions: CanonicalCondition[]
+  exclude_conditions: CanonicalCondition[]
+  unmapped_conditions: UnmappedCondition[]
+}
+
+interface ManualInputRequirement {
+  field: string
+  input_type: "boolean" | "number" | "text" | "select"
+  reason?: string
+  requirement?: string
 }
 
 interface DecisionRow {
@@ -53,8 +85,10 @@ interface DecisionRow {
     missing_required_fields?: string[]
     blocking_unmapped_criteria?: string[]
     manual_inputs?: Record<string, unknown>
+    canonical_rule?: CanonicalRule
   }
   suggested_manual_fields?: string[]
+  manual_input_requirements?: ManualInputRequirement[]
   created_at?: string
 }
 
@@ -130,6 +164,16 @@ const buildDecisionBasis = (row: DecisionRow): string => {
     .filter((k) => src[k] !== undefined && src[k] !== null && src[k] !== "")
     .map((k) => `${k}=${formatValue(src[k])}`)
   return parts.length > 0 ? parts.join(" | ") : "No check-level evidence captured."
+}
+
+const getCanonicalRule = (rule: RuleRow | null | undefined): CanonicalRule | null => {
+  if (!rule) return null
+  return rule.canonical_rule || rule.extracted_metadata?.canonical_rule || null
+}
+
+const describeCondition = (condition: CanonicalCondition): string => {
+  const valuePart = condition.value === undefined ? "" : ` ${formatValue(condition.value)}`
+  return `${condition.field} ${condition.operator}${valuePart}`
 }
 
 export function EligibilityStudio({ API }: EligibilityStudioProps) {
@@ -403,21 +447,33 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }
   }
 
-  const parseManualInputValue = (raw: string): unknown => {
+  const parseManualInputValue = (
+    raw: string,
+    inputType: "boolean" | "number" | "text" | "select" = "text",
+  ): unknown => {
     const v = raw.trim()
     if (!v) return null
+    if (inputType === "text" || inputType === "select") return v
+    if (inputType === "number") {
+      if (!Number.isNaN(Number(v)) && /^-?\d+(\.\d+)?$/.test(v)) return Number(v)
+      return v
+    }
     const upper = v.toUpperCase()
     if (["TRUE", "YES", "Y", "1"].includes(upper)) return true
     if (["FALSE", "NO", "N", "0"].includes(upper)) return false
-    if (!Number.isNaN(Number(v)) && /^-?\d+(\.\d+)?$/.test(v)) return Number(v)
     return v
   }
 
   const handleRejudge = async (row: DecisionRow) => {
     const draft = manualInputDrafts[row.id] || {}
+    const requirementByField = new Map(
+      (row.manual_input_requirements || []).map((req) => [req.field, req.input_type] as const),
+    )
     const manual_inputs: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(draft)) {
-      if (v.trim()) manual_inputs[k] = parseManualInputValue(v)
+      if (v.trim()) {
+        manual_inputs[k] = parseManualInputValue(v, requirementByField.get(k) || "text")
+      }
     }
 
     try {
@@ -441,8 +497,8 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     () => decisions.find((d) => d.id === editingDecisionId) || null,
     [decisions, editingDecisionId],
   )
-  const activeSuggestedFields = useMemo(
-    () => (activeEditingRow?.suggested_manual_fields || []).filter((f) => f && f.trim()),
+  const activeManualRequirements = useMemo(
+    () => (activeEditingRow?.manual_input_requirements || []).filter((f) => f?.field && f.field.trim()),
     [activeEditingRow],
   )
   const activeRemainingMissingFields = useMemo(
@@ -658,6 +714,128 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
           </Card>
 
           <Card className="rounded-3xl border-slate-200 bg-white p-6">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Extracted Rule Metadata</p>
+            {selectedRuleId ? (
+              (() => {
+                const rule = rules.find((r) => r.id === selectedRuleId)
+                if (!rule) {
+                  return <p className="mt-3 text-sm text-slate-500">Rule not found in current list.</p>
+                }
+                return (
+                  <div className="mt-4 space-y-4">
+                    <div className="flex flex-wrap gap-2">
+                      <Badge className="bg-slate-900 text-white">{rule.scheme_id}</Badge>
+                      <Badge className="bg-slate-100 text-slate-700">v{rule.rule_version}</Badge>
+                      <Badge className="bg-slate-100 text-slate-700">{rule.rule_name}</Badge>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Canonical Rule JSON</p>
+                      <pre className="max-h-52 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-slate-100">{JSON.stringify(getCanonicalRule(rule), null, 2)}</pre>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Fetched Eligibility Criteria</p>
+                      <div className="mt-2 space-y-2 text-sm">
+                        {(getCanonicalRule(rule)?.include_conditions || []).length > 0 ? (
+                          getCanonicalRule(rule)?.include_conditions.map((condition, idx) => (
+                            <p key={`inc-${idx}`} className="text-slate-700">
+                              <span className="font-semibold text-slate-900">{describeCondition(condition)}</span>
+                              {condition.evidence_quote ? ` — ${condition.evidence_quote}` : ""}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-slate-500">No mapped include criteria found.</p>
+                        )}
+                        {(getCanonicalRule(rule)?.exclude_conditions || []).length > 0 && (
+                          <>
+                            <p className="pt-1 text-[11px] font-bold uppercase tracking-widest text-slate-500">Exclusions</p>
+                            {getCanonicalRule(rule)?.exclude_conditions.map((condition, idx) => (
+                              <p key={`exc-${idx}`} className="text-slate-700">
+                                <span className="font-semibold text-slate-900">{describeCondition(condition)}</span>
+                                {condition.evidence_quote ? ` — ${condition.evidence_quote}` : ""}
+                              </p>
+                            ))}
+                          </>
+                        )}
+                        {(getCanonicalRule(rule)?.unmapped_conditions || []).length > 0 && (
+                          <>
+                            <p className="pt-1 text-[11px] font-bold uppercase tracking-widest text-slate-500">Manual Review Conditions</p>
+                            {getCanonicalRule(rule)?.unmapped_conditions.map((condition, idx) => (
+                              <p key={`unmapped-${idx}`} className="text-slate-700">
+                                <span className="font-semibold text-slate-900">{condition.requirement}</span>
+                                {` -> ${condition.suggested_input_field} (${condition.input_type})`}
+                              </p>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {!!rule.extracted_metadata?.document_intent?.summary && (
+                      <Card className="rounded-2xl border-sky-200 bg-sky-50 px-3 py-2">
+                        <p className="text-xs font-semibold text-sky-700">
+                          Document intent: {rule.extracted_metadata.document_intent.summary}
+                        </p>
+                      </Card>
+                    )}
+                    {!!rule.extracted_metadata?.evidence?.length && (
+                      <div>
+                        <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Evidence From Document</p>
+                        <div className="max-h-52 space-y-2 overflow-auto rounded-xl border border-slate-200 bg-white p-3">
+                          {rule.extracted_metadata.evidence.slice(0, 8).map((ev: any, idx: number) => (
+                            <div key={`ev-${idx}`} className="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1.5">
+                              <p className="text-[11px] font-bold text-slate-700">{ev.field || "field"}</p>
+                              <p className="text-xs text-slate-600">{ev.quote || "-"}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {!!rule.extracted_metadata?.detected_criteria?.length && (
+                      <div>
+                        <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Detected Criteria (Dynamic)</p>
+                        <div className="max-h-56 space-y-2 overflow-auto rounded-xl border border-slate-200 bg-white p-3">
+                          {rule.extracted_metadata.detected_criteria.slice(0, 20).map((dc: any, idx: number) => (
+                            <div key={`dc-${idx}`} className="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1.5">
+                              <p className="text-[11px] font-bold text-slate-700">
+                                {dc.criterion_key}{" "}
+                                <span className="font-normal text-slate-500">
+                                  [{dc.bucket}] [{dc.status}]
+                                </span>
+                              </p>
+                              {!!dc.suggested_input_field && (
+                                <p className="text-[11px] text-sky-700">Suggested input: {dc.suggested_input_field}</p>
+                              )}
+                              {!!dc.evidence_quote && <p className="text-xs text-slate-600">{dc.evidence_quote}</p>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {!!(getCanonicalRule(rule)?.unmapped_conditions?.length) && (
+                      <Card className="rounded-2xl border-violet-200 bg-violet-50 px-3 py-2">
+                        <p className="text-xs font-semibold text-violet-700">
+                          Unmapped criteria detected: {(getCanonicalRule(rule)?.unmapped_conditions || []).map((item) => item.suggested_input_field || item.requirement).join(", ")}.
+                          Evaluation will be marked REVIEW_REQUIRED until the needed manual inputs are supplied.
+                        </p>
+                      </Card>
+                    )}
+                    {(getCanonicalRule(rule)?.include_conditions || []).length === 0 && (getCanonicalRule(rule)?.exclude_conditions || []).length === 0 && (
+                      <Card className="rounded-2xl border-amber-200 bg-amber-50 px-3 py-2">
+                        <p className="text-xs font-semibold text-amber-700">
+                          No usable eligibility criteria were extracted from this document yet. Evaluation will mark rows as REVIEW_REQUIRED.
+                        </p>
+                      </Card>
+                    )}
+                  </div>
+                )
+              })()
+            ) : (
+              <p className="mt-3 text-sm text-slate-500">Select a rule to inspect metadata.</p>
+            )}
+          </Card>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Card className="rounded-3xl border-slate-200 bg-white p-6">
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Step 2: Evaluate Citizens</p>
             <div className="mt-4 space-y-3">
               <div>
@@ -710,119 +888,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                 Show decisions from all schemes/rules
               </label>
             </div>
-          </Card>
-        </div>
-
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Card className="rounded-3xl border-slate-200 bg-white p-6">
-            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Extracted Rule Metadata</p>
-            {selectedRuleId ? (
-              (() => {
-                const rule = rules.find((r) => r.id === selectedRuleId)
-                if (!rule) {
-                  return <p className="mt-3 text-sm text-slate-500">Rule not found in current list.</p>
-                }
-                return (
-                  <div className="mt-4 space-y-4">
-                    <div className="flex flex-wrap gap-2">
-                      <Badge className="bg-slate-900 text-white">{rule.scheme_id}</Badge>
-                      <Badge className="bg-slate-100 text-slate-700">v{rule.rule_version}</Badge>
-                      <Badge className="bg-slate-100 text-slate-700">{rule.rule_name}</Badge>
-                    </div>
-                    <div>
-                      <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Include Conditions</p>
-                      <pre className="max-h-52 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-slate-100">{JSON.stringify(rule.include_conditions || {}, null, 2)}</pre>
-                    </div>
-                    <div>
-                      <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Exclude Conditions</p>
-                      <pre className="max-h-52 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-slate-100">{JSON.stringify(rule.exclude_conditions || {}, null, 2)}</pre>
-                    </div>
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Fetched Eligibility Criteria</p>
-                      <div className="mt-2 space-y-2 text-sm">
-                        {Object.keys(rule.include_conditions || {}).length > 0 ? (
-                          Object.entries(rule.include_conditions || {}).map(([k, v]) => (
-                            <p key={`inc-${k}`} className="text-slate-700">
-                              <span className="font-semibold text-slate-900">{k}</span>: {JSON.stringify(v)}
-                            </p>
-                          ))
-                        ) : (
-                          <p className="text-slate-500">No mapped include criteria found.</p>
-                        )}
-                        {Object.keys(rule.exclude_conditions || {}).length > 0 && (
-                          <>
-                            <p className="pt-1 text-[11px] font-bold uppercase tracking-widest text-slate-500">Exclusions</p>
-                            {Object.entries(rule.exclude_conditions || {}).map(([k, v]) => (
-                              <p key={`exc-${k}`} className="text-slate-700">
-                                <span className="font-semibold text-slate-900">{k}</span>: {JSON.stringify(v)}
-                              </p>
-                            ))}
-                          </>
-                        )}
-                      </div>
-                    </div>
-                    {!!rule.extracted_metadata?.document_intent?.summary && (
-                      <Card className="rounded-2xl border-sky-200 bg-sky-50 px-3 py-2">
-                        <p className="text-xs font-semibold text-sky-700">
-                          Document intent: {rule.extracted_metadata.document_intent.summary}
-                        </p>
-                      </Card>
-                    )}
-                    {!!rule.extracted_metadata?.evidence?.length && (
-                      <div>
-                        <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Evidence From Document</p>
-                        <div className="max-h-52 space-y-2 overflow-auto rounded-xl border border-slate-200 bg-white p-3">
-                          {rule.extracted_metadata.evidence.slice(0, 8).map((ev: any, idx: number) => (
-                            <div key={`ev-${idx}`} className="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1.5">
-                              <p className="text-[11px] font-bold text-slate-700">{ev.field || "field"}</p>
-                              <p className="text-xs text-slate-600">{ev.quote || "-"}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {!!rule.extracted_metadata?.detected_criteria?.length && (
-                      <div>
-                        <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Detected Criteria (Dynamic)</p>
-                        <div className="max-h-56 space-y-2 overflow-auto rounded-xl border border-slate-200 bg-white p-3">
-                          {rule.extracted_metadata.detected_criteria.slice(0, 20).map((dc: any, idx: number) => (
-                            <div key={`dc-${idx}`} className="rounded-lg border border-slate-100 bg-slate-50 px-2 py-1.5">
-                              <p className="text-[11px] font-bold text-slate-700">
-                                {dc.criterion_key}{" "}
-                                <span className="font-normal text-slate-500">
-                                  [{dc.bucket}] [{dc.status}]
-                                </span>
-                              </p>
-                              {!!dc.suggested_input_field && (
-                                <p className="text-[11px] text-sky-700">Suggested input: {dc.suggested_input_field}</p>
-                              )}
-                              {!!dc.evidence_quote && <p className="text-xs text-slate-600">{dc.evidence_quote}</p>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {!!(rule.extracted_metadata?.unmapped_criteria?.length) && (
-                      <Card className="rounded-2xl border-violet-200 bg-violet-50 px-3 py-2">
-                        <p className="text-xs font-semibold text-violet-700">
-                          Unmapped criteria detected: {rule.extracted_metadata?.unmapped_criteria?.join(", ")}.
-                          Evaluation will be marked REVIEW_REQUIRED until these are structurally mapped.
-                        </p>
-                      </Card>
-                    )}
-                    {Object.keys(rule.include_conditions || {}).length === 0 && Object.keys(rule.exclude_conditions || {}).length === 0 && (
-                      <Card className="rounded-2xl border-amber-200 bg-amber-50 px-3 py-2">
-                        <p className="text-xs font-semibold text-amber-700">
-                          No usable eligibility criteria were extracted from this document yet. Evaluation will mark rows as REVIEW_REQUIRED.
-                        </p>
-                      </Card>
-                    )}
-                  </div>
-                )
-              })()
-            ) : (
-              <p className="mt-3 text-sm text-slate-500">Select a rule to inspect metadata.</p>
-            )}
           </Card>
 
           <Card className="rounded-3xl border-slate-200 bg-white p-6">
@@ -924,8 +989,8 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                           if (!manualInputDrafts[row.id]) {
                             const existing = row.evidence_json?.manual_inputs || {}
                             const initial: Record<string, string> = {}
-                            for (const f of (row.suggested_manual_fields || [])) {
-                              initial[f] = String((existing as any)?.[f] ?? "")
+                            for (const req of (row.manual_input_requirements || [])) {
+                              initial[req.field] = String((existing as any)?.[req.field] ?? "")
                             }
                             setManualInputDrafts((prev) => ({ ...prev, [row.id]: initial }))
                           }
@@ -988,14 +1053,18 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
           </div>
         </Card>
         <Dialog open={!!activeEditingRow} onOpenChange={(open) => { if (!open) setEditingDecisionId(null) }}>
-          <DialogContent className="max-w-3xl rounded-2xl">
+          <DialogContent className="max-h-[90vh] max-w-3xl overflow-hidden rounded-2xl p-0">
+            <div className="flex max-h-[90vh] flex-col">
+            <div className="border-b border-slate-200 px-6 py-5">
             <DialogHeader>
               <DialogTitle>Manual Inputs For Eligibility Re-judgement</DialogTitle>
               <DialogDescription>
                 Suggested fields are generated from missing required fields and unmapped criteria for this citizen/rule.
               </DialogDescription>
             </DialogHeader>
+            </div>
             {activeEditingRow && (
+              <div className="flex-1 overflow-y-auto px-6 py-5">
               <div className="space-y-3">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
                   <p><span className="font-semibold">UID:</span> {activeEditingRow.citizen_uid}</p>
@@ -1005,7 +1074,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                 <div className="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800">
                   <p className="font-semibold">Suggested inputs by system:</p>
                   <p className="mt-1">
-                    {activeSuggestedFields.join(", ") || "No missing essential fields detected from current mapped rules."}
+                    {activeManualRequirements.map((item) => item.field).join(", ") || "No missing essential fields detected from current mapped rules."}
                   </p>
                 </div>
                 {(activeRemainingMissingFields.length > 0 || activeRemainingUnmapped.length > 0) && (
@@ -1023,24 +1092,29 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                     )}
                   </div>
                 )}
-                {activeSuggestedFields.length > 0 ? (
+                {activeManualRequirements.length > 0 ? (
                   <div className="grid grid-cols-2 gap-2">
-                    {activeSuggestedFields.map((f) => (
-                    <Input
-                      key={`${activeEditingRow.id}-${f}`}
-                      value={manualInputDrafts[activeEditingRow.id]?.[f] ?? ""}
-                      onChange={(e) =>
-                        setManualInputDrafts((prev) => ({
-                          ...prev,
-                          [activeEditingRow.id]: {
-                            ...(prev[activeEditingRow.id] || {}),
-                            [f]: e.target.value,
-                          },
-                        }))
-                      }
-                      placeholder={f}
-                      className="h-9 rounded-md text-xs"
-                    />
+                    {activeManualRequirements.map((req) => (
+                      <div key={`${activeEditingRow.id}-${req.field}`} className="space-y-1">
+                        <p className="text-[11px] font-semibold text-slate-600">
+                          {req.field} ({req.input_type})
+                        </p>
+                        <Input
+                          value={manualInputDrafts[activeEditingRow.id]?.[req.field] ?? ""}
+                          onChange={(e) =>
+                            setManualInputDrafts((prev) => ({
+                              ...prev,
+                              [activeEditingRow.id]: {
+                                ...(prev[activeEditingRow.id] || {}),
+                                [req.field]: e.target.value,
+                              },
+                            }))
+                          }
+                          placeholder={req.requirement || req.reason || req.field}
+                          className="h-9 rounded-md text-xs"
+                        />
+                        {!!req.reason && <p className="text-[11px] text-slate-500">{req.reason}</p>}
+                      </div>
                     ))}
                   </div>
                 ) : (
@@ -1049,16 +1123,20 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                   </div>
                 )}
               </div>
+              </div>
             )}
+            <div className="border-t border-slate-200 px-6 py-4">
             <DialogFooter>
               <Button variant="outline" onClick={() => setEditingDecisionId(null)}>Cancel</Button>
               <Button
                 onClick={() => { if (activeEditingRow) void handleRejudge(activeEditingRow) }}
-                disabled={!activeEditingRow || savingManual || activeSuggestedFields.length === 0}
+                disabled={!activeEditingRow || savingManual || activeManualRequirements.length === 0}
               >
                 {savingManual ? "Saving..." : "Save & Re-judge"}
               </Button>
             </DialogFooter>
+            </div>
+            </div>
           </DialogContent>
         </Dialog>
       </div>

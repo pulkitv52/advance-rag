@@ -15,6 +15,10 @@ from src.models.eligibility import (
     EligibilitySchemaSignal,
 )
 from src.services import eligibility
+from src.services.eligibility_schema import (
+    manual_input_type_for_field,
+    normalize_policy_concept,
+)
 
 router = APIRouter(prefix="/api/eligibility", tags=["Eligibility Audit"])
 
@@ -25,30 +29,6 @@ DECISION_BUCKET_MAP = {
     "NOT_APPLICABLE": "NOT_ELIGIBLE_NOT_ENROLLED",
     "REVIEW_REQUIRED": "REVIEW_REQUIRED",
 }
-
-UNMAPPED_TO_MANUAL_FIELD_MAP = {
-    "medical_allowance_opt_in": ["medical_allowance_opt_in"],
-    "eligible_caste": ["caste"],
-    "caste_eligibility": ["caste"],
-    "gender_restriction": ["gender"],
-    "gender_restriction_boys": ["gender", "male_sibling_scholarship_count"],
-    "income_limit": ["annual_income"],
-    "nationality": ["nationality"],
-    "eligible_nationality": ["nationality"],
-    "course_level": ["course_level"],
-    "course_eligibility": ["course_level"],
-    "institution_eligibility": ["institution_type"],
-    "institution_code": ["institution_type"],
-    "institution_standard": ["institution_type"],
-    "single_scholarship_rule": ["no_other_scholarship"],
-    "no_other_scholarship": ["no_other_scholarship"],
-    "other_scholarship_exclusion": ["no_other_scholarship"],
-    "single_other_scholarship_exclusion": ["no_other_scholarship"],
-    "beneficiary_category": ["caste"],
-    "institution_criteria": ["institution_type"],
-    "online_course_eligibility": ["study_mode"],
-}
-
 
 RULE_KEY_TO_INPUT_FIELD_MAP = {
     "age_min": ["member_dob"],
@@ -80,13 +60,24 @@ def _suggest_manual_fields(evidence: dict) -> list[str]:
     source_values = evidence.get("source_values") or {}
     include_conditions = evidence.get("include_conditions") or {}
     exclude_conditions = evidence.get("exclude_conditions") or {}
+    canonical_rule = evidence.get("canonical_rule") or {}
 
     # 1) Essential fields required by mapped executable rule keys.
     required_inputs: list[str] = []
-    for k in include_conditions.keys():
-        required_inputs.extend(RULE_KEY_TO_INPUT_FIELD_MAP.get(str(k), []))
-    for k in exclude_conditions.keys():
-        required_inputs.extend(RULE_KEY_TO_INPUT_FIELD_MAP.get(str(k), []))
+    if isinstance(canonical_rule, dict):
+        for condition in canonical_rule.get("include_conditions", []) or []:
+            field_name = str(condition.get("field") or "").strip()
+            if field_name:
+                required_inputs.append(field_name)
+        for condition in canonical_rule.get("exclude_conditions", []) or []:
+            field_name = str(condition.get("field") or "").strip()
+            if field_name:
+                required_inputs.append(field_name)
+    else:
+        for k in include_conditions.keys():
+            required_inputs.extend(RULE_KEY_TO_INPUT_FIELD_MAP.get(str(k), []))
+        for k in exclude_conditions.keys():
+            required_inputs.extend(RULE_KEY_TO_INPUT_FIELD_MAP.get(str(k), []))
     required_inputs = list(dict.fromkeys(required_inputs))
 
     # Suggest only if missing/null in DB source values.
@@ -95,24 +86,90 @@ def _suggest_manual_fields(evidence: dict) -> list[str]:
             suggested.append(field_name)
 
     # 2) Missing fields already detected by evaluator.
-    for f in (evidence.get("missing_required_fields") or []):
+    for f in evidence.get("missing_required_fields") or []:
         if isinstance(f, str) and f.strip():
             suggested.append(f.strip())
 
     # 3) Unmapped criteria -> mapped manual fields (best-effort guidance).
-    for key in (evidence.get("blocking_unmapped_criteria") or []):
+    for condition in (
+        canonical_rule.get("unmapped_conditions", []) if isinstance(canonical_rule, dict) else []
+    ):
+        field_name = str(condition.get("suggested_input_field") or "").strip()
+        if field_name:
+            suggested.append(field_name)
+
+    for key in evidence.get("blocking_unmapped_criteria") or []:
         raw_key = str(key)
         # Normalize keys like "exclude_conditions.conflict_scheme_ids".
         normalized_key = raw_key.split(".")[-1]
-        mapped = UNMAPPED_TO_MANUAL_FIELD_MAP.get(raw_key, []) or UNMAPPED_TO_MANUAL_FIELD_MAP.get(
-            normalized_key, []
-        )
-        for field_name in mapped:
-            if _is_empty_value(source_values.get(field_name)):
+        normalized = normalize_policy_concept(normalized_key)
+        if normalized.get("mapped") == "true":
+            field_name = str(normalized.get("field") or "").strip()
+            if field_name and _is_empty_value(source_values.get(field_name)):
                 suggested.append(field_name)
 
     # Keep stable order and uniqueness.
     return list(dict.fromkeys([x for x in suggested if x]))
+
+
+def _manual_input_requirements(evidence: dict) -> list[dict]:
+    requirements_by_field: dict[str, dict] = {}
+    canonical_rule = evidence.get("canonical_rule") or {}
+    source_values = evidence.get("source_values") or {}
+    missing_required_fields = {
+        str(field).strip()
+        for field in (evidence.get("missing_required_fields") or [])
+        if str(field).strip()
+    }
+
+    for condition in (
+        canonical_rule.get("unmapped_conditions", []) if isinstance(canonical_rule, dict) else []
+    ):
+        field_name = str(condition.get("suggested_input_field") or "").strip()
+        if not field_name:
+            continue
+        raw_requirement = str(condition.get("requirement") or "").strip()
+        normalized = normalize_policy_concept(raw_requirement or field_name)
+        mapped = normalized.get("mapped") == "true"
+        requirements_by_field[field_name] = {
+            "field": field_name,
+            "input_type": str(condition.get("input_type") or "text"),
+            "reason": (
+                f"Normalized from policy concept '{raw_requirement}' and requires manual input because it is not executable from the current dataset."
+                if mapped and raw_requirement and field_name != raw_requirement
+                else str(condition.get("reason_unmapped") or condition.get("requirement") or "")
+            ),
+            "requirement": condition.get("requirement"),
+            "mapped_from_policy_concept": mapped,
+        }
+
+    for field_name in _suggest_manual_fields(evidence):
+        if field_name in missing_required_fields or _is_empty_value(source_values.get(field_name)):
+            reason = (
+                "Missing in the current citizen dataset row and required for executable evaluation."
+            )
+        else:
+            reason = "Required to evaluate mapped eligibility criteria."
+        if field_name in requirements_by_field:
+            if "Missing in the current citizen dataset row" in reason:
+                requirements_by_field[field_name]["reason"] = reason
+            continue
+        requirements_by_field[field_name] = {
+            "field": field_name,
+            "input_type": manual_input_type_for_field(field_name),
+            "reason": reason,
+        }
+
+    return list(requirements_by_field.values())
+
+
+def _merge_latest_rule_into_evidence(evidence: dict, rule: EligibilityRule | None) -> dict:
+    merged = dict(evidence or {})
+    if rule is not None:
+        merged["canonical_rule"] = (rule.extracted_metadata or {}).get("canonical_rule")
+        merged["include_conditions"] = rule.include_conditions
+        merged["exclude_conditions"] = rule.exclude_conditions
+    return merged
 
 
 class ExtractRuleRequest(BaseModel):
@@ -160,6 +217,7 @@ async def extract_rule_from_uploaded_document(
         "rule_version": rule.rule_version,
         "include_conditions": rule.include_conditions,
         "exclude_conditions": rule.exclude_conditions,
+        "canonical_rule": (rule.extracted_metadata or {}).get("canonical_rule"),
         "source_filename": rule.source_filename,
         "source_excerpt": rule.source_excerpt,
         "scheme_detection": (rule.extracted_metadata or {}).get("scheme_detection"),
@@ -218,7 +276,9 @@ async def evaluate_all_rules(
     session: AsyncSession = Depends(get_session),
 ):
     rules_result = await session.exec(
-        select(EligibilityRule).where(EligibilityRule.status == "ACTIVE").order_by(desc(EligibilityRule.created_at))
+        select(EligibilityRule)
+        .where(EligibilityRule.status == "ACTIVE")
+        .order_by(desc(EligibilityRule.created_at))
     )
     rules = rules_result.all()
     if not rules:
@@ -263,6 +323,12 @@ async def list_decisions(
     query = query.limit(limit)
     result = await session.exec(query)
     rows = result.all()
+    rule_ids = sorted({str(r.rule_id) for r in rows if getattr(r, "rule_id", None)})
+    rule_by_id: dict[str, EligibilityRule] = {}
+    for rule_id in rule_ids:
+        rule = await session.get(EligibilityRule, rule_id)
+        if rule is not None:
+            rule_by_id[rule_id] = rule
 
     # Enrich with citizen_name (prefer saved evidence, fallback to srsadmin lookup).
     uids = [str(r.citizen_uid) for r in rows if getattr(r, "citizen_uid", None)]
@@ -270,14 +336,12 @@ async def list_decisions(
     if uids:
         try:
             # Detect name column in srsadmin table to avoid schema variance issues.
-            col_stmt = text(
-                """
+            col_stmt = text("""
                 SELECT column_name
                 FROM information_schema.columns
                 WHERE table_schema = 'srsadmin'
                   AND table_name = 'swasthya_sathi_beneficiary'
-                """
-            )
+                """)
             cols_result = await session.execute(col_stmt)
             available_cols = {str(r[0]).lower() for r in cols_result.fetchall()}
 
@@ -289,14 +353,12 @@ async def list_decisions(
 
             if name_col:
                 # Per-UID lookup is intentionally used for portability with text() SQL binds.
-                fetch_stmt = text(
-                    f"""
+                fetch_stmt = text(f"""
                     SELECT uid, {name_col} AS citizen_name
                     FROM srsadmin.swasthya_sathi_beneficiary
                     WHERE uid = :uid
                     LIMIT 1
-                    """
-                )
+                    """)
                 for uid in sorted(set(uids)):
                     row_result = await session.execute(fetch_stmt, {"uid": uid})
                     row = row_result.mappings().first()
@@ -312,7 +374,9 @@ async def list_decisions(
 
     serialized = []
     for row in rows:
-        evidence = row.evidence_json or {}
+        evidence = _merge_latest_rule_into_evidence(
+            row.evidence_json or {}, rule_by_id.get(str(row.rule_id))
+        )
         citizen_name = evidence.get("citizen_name") or uid_to_name.get(str(row.citizen_uid))
         serialized.append(
             {
@@ -326,8 +390,9 @@ async def list_decisions(
                 "reason": row.reason,
                 "decision_confidence": row.decision_confidence,
                 "identity_match_confidence": row.identity_match_confidence,
-                "evidence_json": row.evidence_json,
+                "evidence_json": evidence,
                 "suggested_manual_fields": _suggest_manual_fields(evidence),
+                "manual_input_requirements": _manual_input_requirements(evidence),
                 "created_at": row.created_at,
             }
         )
@@ -370,6 +435,29 @@ async def apply_manual_inputs_and_rejudge(
     manual_row = existing_manual.first()
     if manual_row is not None:
         prior_inputs = dict(manual_row.values_json or {})
+    latest_evidence = _merge_latest_rule_into_evidence(decision_row.evidence_json or {}, rule)
+    requirements = _manual_input_requirements(latest_evidence)
+    requirement_by_field = {
+        str(item.get("field")): item for item in requirements if item.get("field")
+    }
+    for field_name, value in (request.manual_inputs or {}).items():
+        req = requirement_by_field.get(str(field_name))
+        if not req:
+            continue
+        input_type = str(req.get("input_type") or "text")
+        if input_type == "boolean" and not isinstance(value, bool):
+            raise HTTPException(
+                status_code=400, detail=f"Manual input {field_name} must be boolean."
+            )
+        if input_type == "number" and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise HTTPException(
+                status_code=400, detail=f"Manual input {field_name} must be numeric."
+            )
+        if input_type in {"text", "select"} and not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"Manual input {field_name} must be text.")
+
     merged_manual_inputs = {**prior_inputs, **(request.manual_inputs or {})}
 
     merged = {**citizen, **merged_manual_inputs}
@@ -385,13 +473,14 @@ async def apply_manual_inputs_and_rejudge(
     else:
         manual_row.values_json = eligibility._to_json_safe(merged_manual_inputs)
 
-    evidence = decision_row.evidence_json or {}
+    evidence = latest_evidence
     evidence["manual_inputs"] = eligibility._to_json_safe(merged_manual_inputs)
     evidence["checks"] = outcome.get("checks") or []
     evidence["checked_fields"] = outcome.get("checked_fields") or []
     evidence["missing_required_fields"] = outcome.get("missing_required_fields") or []
     evidence["blocking_unmapped_criteria"] = outcome.get("blocking_unmapped_criteria") or []
     evidence["source_values"] = eligibility._build_source_value_snapshot(merged)
+    evidence["canonical_rule"] = (rule.extracted_metadata or {}).get("canonical_rule")
 
     decision_row.decision = str(outcome.get("decision"))
     decision_row.reason = str(outcome.get("reason"))
@@ -413,6 +502,12 @@ async def apply_manual_inputs_and_rejudge(
         "decision_confidence": decision_row.decision_confidence,
         "identity_match_confidence": decision_row.identity_match_confidence,
         "evidence_json": decision_row.evidence_json,
+        "suggested_manual_fields": _suggest_manual_fields(
+            _merge_latest_rule_into_evidence(decision_row.evidence_json or {}, rule)
+        ),
+        "manual_input_requirements": _manual_input_requirements(
+            _merge_latest_rule_into_evidence(decision_row.evidence_json or {}, rule)
+        ),
         "created_at": decision_row.created_at,
     }
 

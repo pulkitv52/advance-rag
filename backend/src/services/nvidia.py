@@ -452,6 +452,7 @@ async def generate_rag_answer(
     system_prompt: Optional[str] = None,
     model_override: Optional[str] = None,
     stream: bool = False,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """
     Generate a grounded answer using retrieved context chunks and NVIDIA NIM LLM.
@@ -490,24 +491,30 @@ async def generate_rag_answer(
             '   - Use ```json:chart ``` code blocks for Data Charts (Bar/Line/Pie). Format: { "type": "bar"|"line"|"pie", "data": [{"name": "Category", "value": 10}], "options": {"title": "Title"} }.\n'
             "   - ALWAYS provide a text-based executive summary of any generated visualization.\n"
             "5. TABULAR SYNTHESIS: When presenting cost estimates, line-item comparisons, or structured thematic areas, ALWAYS use standard Markdown Tables with pipe separators (|) and header delimiters (|---|).\n"
-            "6. INTEGRITY: If information is missing, state it explicitly. Do not speculate."
+            "6. LIVE DATABASE RECORDS: If the context includes 'Live Database Records' (e.g., enrolled citizens) and the user asks 'who is enrolled' or for a list, you MUST output the exact list of citizens in a markdown table. DO NOT summarize or synthesize the list if they ask for the individuals.\n"
+            "7. STRICT ENTITY MATCHING: If the user asks about a specific Scheme ID (e.g. S767), and a source document is clearly about a different Scheme ID (e.g. S760), you MUST explicitly state that the source is irrelevant and DO NOT use its rules for the requested scheme.\n"
+            "8. INTEGRITY: If information is missing, state it explicitly. Do not speculate."
         )
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": (
-                f"I have retrieved the following technical context to help answer my question.\n\n"
-                f"### Context:\n{context_str}\n\n"
-                f"### Question:\n{query}\n\n"
-                f"### Instructions:\n"
-                f"Based on the context above, provide a detailed and synthesized response to the question. "
-                f"Identify key facts, explain relationships, and ensure all claims are grounded in the 'Sources'.\n\n"
-                f"Answer:"
-            ),
-        },
     ]
+
+    if history:
+        messages.extend(history)
+
+    messages.append({
+        "role": "user",
+        "content": (
+            f"I have retrieved the following technical context to help answer my question.\n\n"
+            f"### Context:\n{context_str}\n\n"
+            f"### Question:\n{query}\n\n"
+            f"### Instructions:\n"
+            f"Based on the context above, provide a detailed and synthesized response to the question. "
+            f"Identify key facts, explain relationships, and ensure all claims are grounded in the 'Sources'.\n\n"
+            f"Answer:"
+        ),
+    })
 
     logger.debug(
         f"RAG Prompt Construction (first 500 chars): {str(messages[1]['content'])[:500]}..."

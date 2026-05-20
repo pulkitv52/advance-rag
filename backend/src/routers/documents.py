@@ -246,6 +246,7 @@ async def get_document(document_id: str, session: AsyncSession = Depends(get_ses
 async def get_knowledge_graph(
     ids: Optional[str] = None,
     q: Optional[str] = None,
+    scheme_id: Optional[str] = None,
     project_id: Optional[str] = None,
     session: AsyncSession = Depends(get_session),
 ):
@@ -279,8 +280,16 @@ async def get_knowledge_graph(
 
         entities = await extractor.extract_entities_from_query(q)
 
-    graph_data = await graph_db.get_combined_graph(document_ids=doc_ids, entities=entities)
+    graph_data = await graph_db.get_combined_graph(
+        document_ids=doc_ids, entities=entities, scheme_id=scheme_id
+    )
     return graph_data
+
+
+@router.get("/graph/schemes", summary="List available USR schemes in Neo4j")
+async def get_graph_schemes():
+    schemes = await graph_db.get_usr_schemes()
+    return {"total": len(schemes), "schemes": schemes}
 
 
 @router.delete("/{document_id}", summary="Delete a document and all its indexed chunks")

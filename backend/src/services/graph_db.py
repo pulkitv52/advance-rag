@@ -59,7 +59,9 @@ async def save_triplets(document_id: str, triplets: List[Dict[str, Any]]):
 
 
 async def get_combined_graph(
-    document_ids: Optional[List[str]] = None, entities: Optional[List[str]] = None
+    document_ids: Optional[List[str]] = None,
+    entities: Optional[List[str]] = None,
+    scheme_id: Optional[str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """
     Retrieves nodes and edges for visualization.
@@ -83,33 +85,59 @@ async def get_combined_graph(
 
             if force_usr_view or not check_record or check_record["cnt"] == 0:
                 logger.info("Knowledge Graph: formatting USR Fraud Intelligence Graph.")
-                # Storytelling Graph: Fraudulent Citizens + Contextual Clean Citizens
-                query = """
-                MATCH (c:Citizen)
-                OPTIONAL MATCH (c)-[:RESIDES_IN]->(gp:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
-                WITH c, gp, b, d,
-                     CASE
-                        WHEN (
-                            c.is_ghost_flag = true
-                            OR c.is_dup_flag = true
-                            OR c.is_anomaly_flag = true
-                            OR c.risk_tier IN ['HIGH', 'CRITICAL']
-                            OR EXISTS { (c)-[:FLAGGED_AS]->(:FraudFlag) }
-                        )
-                        THEN 1 ELSE 0
-                     END AS priority_score
-                ORDER BY priority_score DESC, coalesce(c.vulnerability_score, 0) DESC
-                LIMIT 400
+                if scheme_id:
+                    normalized_scheme = scheme_id.strip().upper()
+                    query = """
+                    MATCH (s:Scheme {id: $scheme_id})
+                    MATCH (c:Citizen)-[enroll:ENROLLED_IN]->(s)
+                    OPTIONAL MATCH (c)-[dup:POTENTIAL_DUPLICATE]->(c2:Citizen)
+                    OPTIONAL MATCH (c)-[flag_edge:FLAGGED_AS]->(f:FraudFlag)
+                    WITH c, s, enroll, dup, c2, flag_edge, f,
+                         CASE
+                            WHEN (
+                                c.is_ghost_flag = true
+                                OR c.is_dup_flag = true
+                                OR c.is_anomaly_flag = true
+                                OR c.risk_tier IN ['HIGH', 'CRITICAL']
+                                OR EXISTS { (c)-[:FLAGGED_AS]->(:FraudFlag) }
+                            )
+                            THEN 1 ELSE 0
+                         END AS priority_score
+                    ORDER BY priority_score DESC, coalesce(c.vulnerability_score, 0) DESC, c.uid ASC
+                    LIMIT 1500
+                    RETURN properties(c) AS c, null AS gp, null AS b, null AS d,
+                           properties(s) AS s, properties(enroll) AS enroll, properties(dup) AS dup,
+                           properties(c2) AS c2, properties(flag_edge) AS flag_edge, properties(f) AS f
+                    """
+                    result = await session.run(query, scheme_id=normalized_scheme)
+                else:
+                    # Storytelling Graph: Fraudulent Citizens + Contextual Clean Citizens
+                    query = """
+                    MATCH (c:Citizen)
+                    OPTIONAL MATCH (c)-[:RESIDES_IN]->(gp:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
+                    WITH c, gp, b, d,
+                         CASE
+                            WHEN (
+                                c.is_ghost_flag = true
+                                OR c.is_dup_flag = true
+                                OR c.is_anomaly_flag = true
+                                OR c.risk_tier IN ['HIGH', 'CRITICAL']
+                                OR EXISTS { (c)-[:FLAGGED_AS]->(:FraudFlag) }
+                            )
+                            THEN 1 ELSE 0
+                         END AS priority_score
+                    ORDER BY priority_score DESC, coalesce(c.vulnerability_score, 0) DESC
+                    LIMIT 1200
 
-                OPTIONAL MATCH (c)-[enroll:ENROLLED_IN]->(s:Scheme)
-                OPTIONAL MATCH (c)-[dup:POTENTIAL_DUPLICATE]->(c2:Citizen)
-                OPTIONAL MATCH (c)-[flag_edge:FLAGGED_AS]->(f:FraudFlag)
-                
-                RETURN properties(c) AS c, properties(gp) AS gp, properties(b) AS b, properties(d) AS d, 
-                       properties(s) AS s, properties(enroll) AS enroll, properties(dup) AS dup, 
-                       properties(c2) AS c2, properties(flag_edge) AS flag_edge, properties(f) AS f
-                """
-                result = await session.run(query)
+                    OPTIONAL MATCH (c)-[enroll:ENROLLED_IN]->(s:Scheme)
+                    OPTIONAL MATCH (c)-[dup:POTENTIAL_DUPLICATE]->(c2:Citizen)
+                    OPTIONAL MATCH (c)-[flag_edge:FLAGGED_AS]->(f:FraudFlag)
+                    
+                    RETURN properties(c) AS c, properties(gp) AS gp, properties(b) AS b, properties(d) AS d, 
+                           properties(s) AS s, properties(enroll) AS enroll, properties(dup) AS dup, 
+                           properties(c2) AS c2, properties(flag_edge) AS flag_edge, properties(f) AS f
+                    """
+                    result = await session.run(query)
                 records = await result.data()
 
                 if not records:
@@ -175,17 +203,34 @@ async def get_combined_graph(
                         gp.get("code") if gp else None, gp.get("name", "GP") if gp else "", "GP"
                     )
 
-                    # Citizen node (mark red if risk-tier or explicitly fraud-flagged)
+                    f = rec.get("f")
+                    fraud_reason = None
+                    if f:
+                        fraud_reason = f"{f.get('type')}: {f.get('description')}"
+                    elif c.get("is_ghost_flag"):
+                        fraud_reason = "Ghost/Deceased Account"
+                    elif c.get("is_dup_flag"):
+                        fraud_reason = "Duplicate Identity"
+                    elif c.get("is_anomaly_flag"):
+                        fraud_reason = "Usage Anomaly"
+                    elif c.get("risk_tier") in ["HIGH", "CRITICAL"]:
+                        fraud_reason = f"Risk Tier: {c.get('risk_tier')}"
+
                     c_type = (
                         "FraudFlag"
-                        if (c.get("risk_tier") in ["HIGH", "CRITICAL"] or rec.get("f"))
+                        if fraud_reason or c.get("risk_tier") in ["HIGH", "CRITICAL"]
                         else "Citizen"
                     )
+                    
+                    props = {"risk_tier": c.get("risk_tier", "LOW")}
+                    if fraud_reason:
+                        props["fraud_reason"] = fraud_reason
+
                     add_node(
                         c["uid"],
                         c.get("name", "Unknown"),
                         c_type,
-                        {"risk_tier": c.get("risk_tier", "LOW")},
+                        props,
                     )
 
                     # Geographic links
@@ -335,6 +380,40 @@ async def get_combined_graph(
     except Exception as e:
         logger.warning(f"Knowledge graph unavailable, returning empty graph: {e}")
         return {"nodes": [], "links": []}
+
+
+async def get_usr_schemes() -> List[Dict[str, Any]]:
+    """Return all USR scheme nodes with lightweight rollup counts for the UI."""
+    try:
+        driver = await get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (s:Scheme)
+                OPTIONAL MATCH (c:Citizen)-[:ENROLLED_IN]->(s)
+                OPTIONAL MATCH (e:Enrollment)-[:ENROLLED_IN]->(s)
+                RETURN
+                    s.id AS id,
+                    coalesce(s.name, s.id) AS name,
+                    count(DISTINCT c) AS citizen_count,
+                    count(DISTINCT e) AS enrollment_count
+                ORDER BY citizen_count DESC, enrollment_count DESC, id ASC
+                """
+            )
+            records = await result.data()
+            return [
+                {
+                    "id": record.get("id"),
+                    "name": record.get("name") or record.get("id"),
+                    "citizen_count": int(record.get("citizen_count") or 0),
+                    "enrollment_count": int(record.get("enrollment_count") or 0),
+                }
+                for record in records
+                if record.get("id")
+            ]
+    except Exception as e:
+        logger.warning(f"Failed to load scheme catalog from Neo4j: {e}")
+        return []
 
 
 async def search_multi_hop_context(
@@ -609,3 +688,30 @@ async def delete_document_triplets(document_id: str):
             logger.info(f"Purged Knowledge Graph associations for document {document_id}")
         except Exception as e:
             logger.error(f"Failed to purge Knowledge Graph associations for {document_id}: {e}")
+
+async def get_usr_citizens_by_scheme(scheme_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Deterministically retrieve citizens enrolled in a specific scheme by scheme ID.
+    Used for True Hybrid RAG cross-referencing.
+    """
+    if not scheme_id or not scheme_id.strip():
+        return []
+
+    driver = await get_driver()
+    async with driver.session() as session:
+        query = """
+        MATCH (c:Citizen)-[:ENROLLED_IN]->(s:Scheme {id: $scheme_id})
+        OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
+        RETURN
+          c.uid AS uid,
+          c.name AS name,
+          c.dob AS dob,
+          c.gender AS gender,
+          d.name AS district,
+          b.name AS block,
+          g.name AS gp,
+          s.name AS scheme_name
+        LIMIT $limit
+        """
+        result = await session.run(query, scheme_id=scheme_id.strip(), limit=limit)
+        return await result.data()

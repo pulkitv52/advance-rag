@@ -150,6 +150,7 @@ Deep dive into the core mechanics:
 - 🕸️ [Knowledge Graph Guide](docs/KNOWLEDGE_GRAPH_GUIDE.md)
 - 🎯 [Fraud Intelligence Presentation](docs/KG_FRAUD_INTELLIGENCE_PRESENTATION_GUIDE.md)
 - 📝 [Eligibility Layman Brief](docs/USE_CASE_3_LAYMAN_BRIEF.md)
+- 🗃️ [Database Curation](docs/DATABASE_CURATION.md)
 
 ---
 

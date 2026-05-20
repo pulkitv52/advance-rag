@@ -1,7 +1,7 @@
 import json
 import re
-from decimal import Decimal
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -17,6 +17,16 @@ from src.models.eligibility import (
     EligibilitySchemaSignal,
 )
 from src.services import nvidia, storage
+from src.services.eligibility_schema import (
+    build_canonical_rule_from_legacy,
+    build_llm_field_registry,
+    manual_input_type_for_field,
+    merge_canonical_rule_payloads,
+    normalize_policy_concept,
+    normalize_unmapped_condition_payload,
+    sanitize_canonical_rule_payload,
+    validate_canonical_rule_payload,
+)
 
 
 def _clean_text(value: str) -> str:
@@ -38,11 +48,23 @@ def _to_json_safe(value: Any) -> Any:
 
 
 def _parse_amount(raw: str) -> Optional[float]:
-    cleaned = re.sub(r"[^0-9.]", "", raw)
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        return None
+
+    multiplier = 1.0
+    if re.search(r"\bcrores?\b", normalized):
+        multiplier = 10_000_000.0
+    elif re.search(r"\blakhs?\b", normalized):
+        multiplier = 100_000.0
+    elif re.search(r"\bthousand\b", normalized):
+        multiplier = 1_000.0
+
+    cleaned = re.sub(r"[^0-9.]", "", normalized)
     if not cleaned:
         return None
     try:
-        return float(cleaned)
+        return float(cleaned) * multiplier
     except ValueError:
         return None
 
@@ -55,6 +77,117 @@ def _extract_between(pattern: str, text: str) -> Optional[tuple[int, int]]:
         return int(match.group(1)), int(match.group(2))
     except ValueError:
         return None
+
+
+def _split_policy_sentences(raw_text: str) -> List[str]:
+    pieces = re.split(r"(?<=[\.\!\?\:\;])\s+|\n+", str(raw_text or ""))
+    return [_clean_text(piece) for piece in pieces if _clean_text(piece)]
+
+
+def _extract_keyword_fallback_unmapped_conditions(
+    raw_text: str, existing_payload: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    lowered = _clean_text(raw_text).lower()
+    if not lowered:
+        return []
+
+    existing_fields = {
+        str(item.get("field") or "").strip()
+        for item in list(existing_payload.get("include_conditions", []))
+        + list(existing_payload.get("exclude_conditions", []))
+        if item.get("field")
+    }
+    existing_unmapped = {
+        str(item.get("suggested_input_field") or "").strip()
+        for item in existing_payload.get("unmapped_conditions", [])
+        if item.get("suggested_input_field")
+    }
+    sentences = _split_policy_sentences(raw_text)
+
+    fallback_specs = [
+        {
+            "patterns": [r"\bcaste\b", r"\bsc\b", r"\bst\b", r"\bobc\b", r"\bminority\b"],
+            "requirement": "caste_category",
+            "skip_fields": {"caste"},
+        },
+        {
+            "patterns": [r"\bcourse level\b", r"\bundergraduate\b", r"\bpostgraduate\b", r"\bclass\s+(?:xi|xii|11|12)\b"],
+            "requirement": "course_level",
+            "skip_fields": {"course_level"},
+        },
+        {
+            "patterns": [r"\bcourse mode\b", r"\bregular\b", r"\bregular course\b", r"\bdistance\b", r"\bcorrespondence\b", r"\bonline\b"],
+            "requirement": "course_mode",
+            "skip_fields": {"study_mode"},
+        },
+        {
+            "patterns": [r"\binstitution\b", r"\brecognized institution\b", r"\bgovernment institution\b", r"\beducational institution\b"],
+            "requirement": "institution_eligibility",
+            "skip_fields": {"institution_type"},
+        },
+        {
+            "patterns": [r"\bno other scholarship\b", r"\bnot(?:\s+be)?\s+receiving any other scholarship\b", r"\banother scholarship\b"],
+            "requirement": "no_other_scholarship",
+            "skip_fields": {"no_other_scholarship"},
+        },
+        {
+            "patterns": [r"\bpermanent resident\b", r"\bresident of west bengal\b", r"\bwest bengal resident\b"],
+            "requirement": "Permanent resident of West Bengal",
+            "skip_fields": {"has_west_bengal_residency", "permanent_residency_status"},
+        },
+        {
+            "patterns": [r"\bmedical allowance\b"],
+            "requirement": "Employee of State or Central Government drawing Medical Allowance (unless forfeited)",
+            "skip_fields": {"receives_medical_allowance", "medical_allowance_opt_in"},
+        },
+        {
+            "patterns": [r"\bother category\b.*\bstate government\b", r"\bnotified by the state government\b"],
+            "requirement": "Any other category as may be notified by the State Government from time to time",
+            "skip_fields": {"state_notified_category_eligibility"},
+        },
+    ]
+
+    fallback_conditions: List[Dict[str, Any]] = []
+    for spec in fallback_specs:
+        if spec["skip_fields"] & existing_fields or spec["skip_fields"] & existing_unmapped:
+            continue
+        matched_sentence = next(
+            (
+                sentence
+                for sentence in sentences
+                if any(re.search(pattern, sentence, flags=re.IGNORECASE) for pattern in spec["patterns"])
+            ),
+            None,
+        )
+        if not matched_sentence and not any(
+            re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in spec["patterns"]
+        ):
+            continue
+        fallback_conditions.append(
+            normalize_unmapped_condition_payload(
+                {
+                    "requirement": spec["requirement"],
+                    "evidence_quote": matched_sentence,
+                }
+            )
+        )
+
+    for sentence in sentences:
+        if "covered under" not in sentence.lower():
+            continue
+        normalized = normalize_unmapped_condition_payload(
+            {
+                "requirement": sentence,
+                "evidence_quote": sentence,
+            }
+        )
+        suggested = str(normalized.get("suggested_input_field") or "").strip()
+        if not suggested or suggested in existing_unmapped:
+            continue
+        fallback_conditions.append(normalized)
+        existing_unmapped.add(suggested)
+
+    return fallback_conditions
 
 
 def detect_scheme_id_from_filename(filename: str) -> Dict[str, Any]:
@@ -88,16 +221,12 @@ async def detect_scheme_id_from_text(
 
     # 2) Boost using known scheme IDs present in srsadmin dump.
     try:
-        known_rows = await session.exec(
-            text(
-                """
+        known_rows = await session.exec(text("""
                 SELECT DISTINCT scheme_id
                 FROM srsadmin.swasthya_sathi_beneficiary
                 WHERE scheme_id IS NOT NULL AND BTRIM(scheme_id) <> ''
                 LIMIT 2000
-                """
-            )
-        )
+                """))
         known_ids = [str(x).strip().upper() for x in known_rows.all() if x]
         for sid in known_ids:
             if sid and sid in upper:
@@ -132,7 +261,9 @@ def extract_eligibility_metadata(raw_text: str, scheme_id: Optional[str] = None)
     include_conditions: Dict[str, Any] = {}
     exclude_conditions: Dict[str, Any] = {}
 
-    age_between = _extract_between(r"age\s*(?:between|from)\s*(\d{1,3})\s*(?:to|-|and)\s*(\d{1,3})", text)
+    age_between = _extract_between(
+        r"age\s*(?:between|from)\s*(\d{1,3})\s*(?:to|-|and)\s*(\d{1,3})", text
+    )
     if age_between:
         include_conditions["age_min"] = age_between[0]
         include_conditions["age_max"] = age_between[1]
@@ -174,7 +305,7 @@ def extract_eligibility_metadata(raw_text: str, scheme_id: Optional[str] = None)
                 include_conditions["marital_status_in"].append(normalized)
 
     income_match = re.search(
-        r"(?:annual\s+income|income).{0,30}(?:below|less\s+than|up\s*to|upto|not\s*exceed(?:ing)?)\s*(?:rs\.?|inr)?\s*([0-9,]+)",
+        r"(?:annual\s+income|income).{0,40}(?:below|less\s+than|up\s*to|upto|not\s*exceed(?:ing)?)\s*(?:rs\.?|inr)?\s*([0-9][0-9,]*(?:\.\d+)?(?:\s*(?:thousand|lakh|lakhs|crore|crores))?)",
         text,
         flags=re.IGNORECASE,
     )
@@ -240,7 +371,7 @@ def _prepare_llm_text_window(raw_text: str, max_chars: int = 18000) -> str:
     part = max_chars // 3
     head = cleaned[:part]
     mid_start = max(0, (len(cleaned) // 2) - (part // 2))
-    mid = cleaned[mid_start:mid_start + part]
+    mid = cleaned[mid_start : mid_start + part]
     tail = cleaned[-part:]
     return f"[HEAD]\n{head}\n\n[MIDDLE]\n{mid}\n\n[TAIL]\n{tail}"
 
@@ -292,32 +423,16 @@ def _build_detected_criteria(
 
     # Heuristic mapping from evidence field to required manual input concept.
     evidence_lookup: Dict[str, str] = {}
-    for ev in (evidence or []):
+    for ev in evidence or []:
         f = str(ev.get("field") or "").strip()
         q = str(ev.get("quote") or "").strip()
         if f and f not in evidence_lookup:
             evidence_lookup[f] = q
 
-    needs_input_map = {
-        "eligible_caste": "caste",
-        "caste_eligibility": "caste",
-        "income_limit": "annual_income",
-        "nationality": "nationality",
-        "eligible_nationality": "nationality",
-        "course_level": "course_level",
-        "course_eligibility": "course_level",
-        "institution_eligibility": "institution_type",
-        "single_scholarship_rule": "no_other_scholarship",
-        "other_scholarship_exclusion": "no_other_scholarship",
-        "single_other_scholarship_exclusion": "no_other_scholarship",
-        "gender_restriction": "gender",
-        "gender_restriction_boys": "male_sibling_scholarship_count",
-        "medical_allowance_opt_in": "medical_allowance_opt_in",
-    }
-
-    for raw_key in (unmapped_criteria or []):
+    for raw_key in unmapped_criteria or []:
         normalized_key = str(raw_key).split(".")[-1]
-        suggested_input = needs_input_map.get(str(raw_key)) or needs_input_map.get(normalized_key)
+        normalized = normalize_policy_concept(normalized_key)
+        suggested_input = normalized.get("field") if normalized.get("mapped") == "true" else None
         status = "NEEDS_USER_INPUT" if suggested_input else "UNMAPPED_LOGIC"
         criteria.append(
             {
@@ -483,6 +598,7 @@ async def extract_eligibility_metadata_llm(
     focused_text = focused.get("focused_text") or ""
     focused_matches = focused.get("matches") or []
     schema_hint = (scheme_hint or detected_scheme or "").upper() or None
+    field_registry = build_llm_field_registry()
 
     prompt = (
         "You are an expert policy analyst. Analyze the given policy/gazette document text and extract eligibility criteria.\n"
@@ -492,32 +608,22 @@ async def extract_eligibility_metadata_llm(
         "{\n"
         '  "document_intent": {"summary": "string", "document_type": "scheme_guideline|gazette|circular|unknown", "is_eligibility_document": true|false},\n'
         '  "scheme_detection": {"scheme_id": "string|null", "scheme_name": "string|null", "confidence": "HIGH|MEDIUM|LOW"},\n'
-        '  "include_conditions": {\n'
-        '    "age_min": number|null,\n'
-        '    "age_max": number|null,\n'
-        '    "gender_in": ["MALE|FEMALE|TRANSGENDER"],\n'
-        '    "marital_status_in": ["MARRIED|UNMARRIED|WIDOW|DIVORCED"],\n'
-        '    "income_max": number|null,\n'
-        '    "requires_disability": true|false,\n'
-        '    "employment_status_in": ["ACTIVE|EMPLOYED|UNEMPLOYED|CLOSED|TERMINATED|RETIRED"],\n'
-        '    "min_service_months": number|null,\n'
-        '    "ida_covered_required": true|false\n'
-        "  },\n"
-        '  "exclude_conditions": {\n'
-        '    "conflict_scheme_ids": ["string"],\n'
-        '    "employment_status_not_in": ["ACTIVE|EMPLOYED|UNEMPLOYED|CLOSED|TERMINATED|RETIRED"],\n'
-        '    "exclude_if_receives_pension": true|false,\n'
-        '    "exclude_if_retired_or_terminated": true|false,\n'
-        '    "exclude_if_reemployed_same_factory": true|false\n'
-        "  },\n"
+        '  "include_conditions": [{"field":"string","operator":"string","value":"any|null","value_type":"string|null","evidence_quote":"string|null"}],\n'
+        '  "exclude_conditions": [{"field":"string","operator":"string","value":"any|null","value_type":"string|null","evidence_quote":"string|null"}],\n'
+        '  "unmapped_conditions": [{"requirement":"string","suggested_input_field":"string","input_type":"boolean|number|text|select","reason_unmapped":"string","evidence_quote":"string|null"}],\n'
         '  "evidence": [{"field":"string","quote":"string"}],\n'
         '  "extraction_confidence": "HIGH|MEDIUM|LOW",\n'
         '  "no_criteria_reason": "string|null"\n'
         "}\n"
         "Rules:\n"
+        "- Use only fields from the provided logical field registry.\n"
+        "- Use only operators allowed for each field.\n"
         "- Use null/empty arrays when unknown; do not invent facts.\n"
+        "- If a requirement cannot be mapped confidently, put it in unmapped_conditions.\n"
         "- If document does not contain explicit eligibility criteria, set include_conditions/exclude_conditions empty and explain no_criteria_reason.\n"
         f"- Preferred scheme hint (if any): {schema_hint}\n\n"
+        "Logical field registry:\n"
+        f"{json.dumps(field_registry, ensure_ascii=True)}\n\n"
         "Focused criteria context (highest priority):\n"
         f"{focused_text or '[NO_FOCUSED_CONTEXT_FOUND]'}\n\n"
         "Document text:\n"
@@ -536,91 +642,127 @@ async def extract_eligibility_metadata_llm(
     if not parsed:
         return {}
 
-    include = parsed.get("include_conditions") or {}
-    exclude = parsed.get("exclude_conditions") or {}
+    regex_fallback = extract_eligibility_metadata(raw_text, scheme_id=schema_hint)
 
-    # Normalize condition keys to expected structure.
-    normalized_include = {}
-    if include.get("age_min") is not None:
-        normalized_include["age_min"] = include.get("age_min")
-    if include.get("age_max") is not None:
-        normalized_include["age_max"] = include.get("age_max")
-    if include.get("gender_in"):
-        normalized_include["gender_in"] = [str(x).upper() for x in include.get("gender_in", [])]
-    if include.get("marital_status_in"):
-        normalized_include["marital_status_in"] = [
-            str(x).upper() for x in include.get("marital_status_in", [])
-        ]
-    if include.get("income_max") is not None:
-        normalized_include["income_max"] = include.get("income_max")
-    if include.get("requires_disability") is True:
-        normalized_include["requires_disability"] = True
-    if include.get("employment_status_in"):
-        normalized_include["employment_status_in"] = [
-            str(x).upper() for x in include.get("employment_status_in", [])
-        ]
-    if include.get("min_service_months") is not None:
-        normalized_include["min_service_months"] = include.get("min_service_months")
-    if include.get("ida_covered_required") is True:
-        normalized_include["ida_covered_required"] = True
-
-    normalized_exclude = {}
-    if exclude.get("conflict_scheme_ids"):
-        normalized_exclude["conflict_scheme_ids"] = [
-            str(x).upper() for x in exclude.get("conflict_scheme_ids", [])
-        ]
-    if exclude.get("employment_status_not_in"):
-        normalized_exclude["employment_status_not_in"] = [
-            str(x).upper() for x in exclude.get("employment_status_not_in", [])
-        ]
-    if exclude.get("exclude_if_receives_pension") is True:
-        normalized_exclude["exclude_if_receives_pension"] = True
-    if exclude.get("exclude_if_retired_or_terminated") is True:
-        normalized_exclude["exclude_if_retired_or_terminated"] = True
-    if exclude.get("exclude_if_reemployed_same_factory") is True:
-        normalized_exclude["exclude_if_reemployed_same_factory"] = True
-
-    supported_fields = {
-        "age_min",
-        "age_max",
-        "gender_in",
-        "marital_status_in",
-        "income_max",
-        "requires_disability",
-        "employment_status_in",
-        "min_service_months",
-        "ida_covered_required",
-        "conflict_scheme_ids",
-        "employment_status_not_in",
-        "exclude_if_receives_pension",
-        "exclude_if_retired_or_terminated",
-        "exclude_if_reemployed_same_factory",
-    }
+    include = parsed.get("include_conditions") or []
+    exclude = parsed.get("exclude_conditions") or []
+    unmapped_conditions = [
+        normalize_unmapped_condition_payload(item)
+        for item in (parsed.get("unmapped_conditions") or [])
+        if isinstance(item, dict)
+    ]
     evidence = parsed.get("evidence", []) or []
-    detected_fields = [str(item.get("field", "")).strip() for item in evidence if item.get("field")]
-    unmapped_criteria = sorted({f for f in detected_fields if f and f not in supported_fields})
-
     scheme_from_llm = (
-        ((parsed.get("scheme_detection") or {}).get("scheme_id"))
-        or schema_hint
-        or None
+        ((parsed.get("scheme_detection") or {}).get("scheme_id")) or schema_hint or None
+    )
+
+    try:
+        canonical_payload = sanitize_canonical_rule_payload(
+            {
+                "scheme_id": str(scheme_from_llm).upper() if scheme_from_llm else "UNKNOWN",
+                "rule_name": "LLM Extracted Eligibility Rule",
+                "include_conditions": include,
+                "exclude_conditions": exclude,
+                "unmapped_conditions": unmapped_conditions,
+            }
+        )
+    except ValueError:
+        legacy_include = parsed.get("include_conditions") or {}
+        legacy_exclude = parsed.get("exclude_conditions") or {}
+        canonical_payload = build_canonical_rule_from_legacy(
+            scheme_id=str(scheme_from_llm).upper() if scheme_from_llm else "UNKNOWN",
+            rule_name="LLM Extracted Eligibility Rule",
+            include_conditions=legacy_include if isinstance(legacy_include, dict) else {},
+            exclude_conditions=legacy_exclude if isinstance(legacy_exclude, dict) else {},
+            unmapped_criteria=[],
+        )
+
+    regex_canonical_payload = build_canonical_rule_from_legacy(
+        scheme_id=str(scheme_from_llm).upper() if scheme_from_llm else (schema_hint or "UNKNOWN"),
+        rule_name="Regex Fallback Eligibility Rule",
+        include_conditions=regex_fallback.get("include_conditions") or {},
+        exclude_conditions=regex_fallback.get("exclude_conditions") or {},
+        unmapped_criteria=[],
+    )
+    evidence_unmapped = [
+        normalize_unmapped_condition_payload(
+            {
+                "requirement": str(item.get("field") or "").strip(),
+                "evidence_quote": item.get("quote"),
+            }
+        )
+        for item in (parsed.get("evidence") or [])
+        if str(item.get("field") or "").strip()
+        and str(item.get("field") or "").strip()
+        not in {
+            "gender",
+            "annual_income",
+            "age",
+            "marital_status",
+            "employment_status",
+            "scheme_id",
+        }
+    ]
+    canonical_payload = merge_canonical_rule_payloads(
+        canonical_payload,
+        {
+            "scheme_id": canonical_payload.get("scheme_id")
+            or regex_canonical_payload.get("scheme_id")
+            or "UNKNOWN",
+            "rule_name": canonical_payload.get("rule_name") or "LLM Extracted Eligibility Rule",
+            "include_conditions": regex_canonical_payload.get("include_conditions", []),
+            "exclude_conditions": regex_canonical_payload.get("exclude_conditions", []),
+            "unmapped_conditions": evidence_unmapped,
+        },
+    )
+    keyword_fallback_unmapped = _extract_keyword_fallback_unmapped_conditions(
+        raw_text, canonical_payload
+    )
+    canonical_payload = merge_canonical_rule_payloads(
+        canonical_payload,
+        {
+            "scheme_id": canonical_payload.get("scheme_id") or "UNKNOWN",
+            "rule_name": canonical_payload.get("rule_name") or "LLM Extracted Eligibility Rule",
+            "include_conditions": [],
+            "exclude_conditions": [],
+            "unmapped_conditions": keyword_fallback_unmapped,
+        },
+    )
+
+    detected_fields = [str(item.get("field", "")).strip() for item in evidence if item.get("field")]
+    canonical_fields = [
+        str(item.get("field", "")).strip()
+        for item in canonical_payload.get("include_conditions", [])
+        + canonical_payload.get("exclude_conditions", [])
+        if item.get("field")
+    ]
+    unmapped_criteria = sorted(
+        {
+            str(item.get("suggested_input_field") or item.get("requirement") or "").strip()
+            for item in canonical_payload.get("unmapped_conditions", [])
+            if str(item.get("suggested_input_field") or item.get("requirement") or "").strip()
+        }
     )
 
     return {
         "scheme_id": str(scheme_from_llm).upper() if scheme_from_llm else None,
-        "include_conditions": normalized_include,
-        "exclude_conditions": normalized_exclude,
-        "extracted_fields": sorted(
-            set(list(normalized_include.keys()) + list(normalized_exclude.keys()))
-        ),
+        "include_conditions": canonical_payload.get("include_conditions", []),
+        "exclude_conditions": canonical_payload.get("exclude_conditions", []),
+        "canonical_rule": canonical_payload,
+        "extracted_fields": sorted(set(canonical_fields + detected_fields)),
         "parser": "llm_v2",
         "document_intent": parsed.get("document_intent"),
         "scheme_detection_llm": parsed.get("scheme_detection"),
         "evidence": evidence,
         "unmapped_criteria": unmapped_criteria,
+        "unmapped_conditions": canonical_payload.get("unmapped_conditions", []),
         "detected_criteria": _build_detected_criteria(
-            include_conditions=normalized_include,
-            exclude_conditions=normalized_exclude,
+            include_conditions={
+                "canonical_count": len(canonical_payload.get("include_conditions", []))
+            },
+            exclude_conditions={
+                "canonical_count": len(canonical_payload.get("exclude_conditions", []))
+            },
             evidence=evidence,
             unmapped_criteria=unmapped_criteria,
         ),
@@ -666,7 +808,9 @@ def _calculate_age(dob: Optional[date], as_of: Optional[date] = None) -> Optiona
 
 
 def _normalize_text(value: Any) -> str:
-    return str(value or "").strip().upper()
+    if value is None:
+        return ""
+    return str(value).strip().upper()
 
 
 def _to_int(value: Any) -> Optional[int]:
@@ -729,167 +873,257 @@ def _is_empty_manual_value(value: Any) -> bool:
     return False
 
 
-def evaluate_citizen_against_rule(citizen: Dict[str, Any], rule: EligibilityRule) -> Dict[str, Any]:
-    include = rule.include_conditions or {}
-    exclude = rule.exclude_conditions or {}
+def _get_canonical_rule_payload(rule: EligibilityRule) -> Dict[str, Any]:
     extracted_meta = rule.extracted_metadata or {}
+    canonical = extracted_meta.get("canonical_rule")
+    if isinstance(canonical, dict):
+        return validate_canonical_rule_payload(canonical)
 
+    return build_canonical_rule_from_legacy(
+        scheme_id=str(rule.scheme_id),
+        rule_name=str(rule.rule_name),
+        include_conditions=rule.include_conditions or {},
+        exclude_conditions=rule.exclude_conditions or {},
+        unmapped_criteria=extracted_meta.get("unmapped_criteria") or [],
+    )
+
+
+def _resolve_logical_field_value(citizen: Dict[str, Any], field_name: str) -> Any:
+    if field_name == "age":
+        return _calculate_age(_parse_dob(citizen.get("member_dob")))
+    if field_name == "gender":
+        return _normalize_text(citizen.get("gender"))
+    if field_name == "marital_status":
+        return _normalize_text(citizen.get("marital_status"))
+    if field_name == "annual_income":
+        income_raw = citizen.get("annual_income")
+        return _parse_amount(str(income_raw)) if income_raw is not None else None
+    if field_name == "is_disabled":
+        return _to_boolish(citizen.get("is_disabled") or citizen.get("disability_status"))
+    if field_name == "employment_status":
+        return _normalize_text(citizen.get("employment_status"))
+    if field_name == "service_duration_months":
+        return _to_int(citizen.get("service_duration_months"))
+    if field_name == "ida_covered":
+        return _to_boolish(citizen.get("ida_covered"))
+    if field_name == "scheme_id":
+        return _normalize_text(citizen.get("scheme_id"))
+    if field_name == "receives_pension":
+        return _to_boolish(citizen.get("receives_pension"))
+    if field_name == "retired_or_terminated":
+        return _to_boolish(citizen.get("retired_or_terminated"))
+    if field_name == "reemployed_same_factory":
+        return _to_boolish(citizen.get("reemployed_same_factory"))
+    if field_name == "member_dob":
+        dob = _parse_dob(citizen.get("member_dob"))
+        return dob.isoformat() if dob else None
+    if field_name == "caste":
+        return _normalize_text(citizen.get("caste"))
+    if field_name == "rc_ration_card_type_code":
+        return _normalize_text(citizen.get("rc_ration_card_type_code"))
+    if field_name == "rc_is_hof":
+        return _to_boolish(citizen.get("rc_is_hof"))
+    return citizen.get(field_name)
+
+
+def _normalize_expected_value(field_name: str, value: Any) -> Any:
+    if value is None:
+        return None
+    if field_name in {
+        "gender",
+        "marital_status",
+        "employment_status",
+        "scheme_id",
+        "caste",
+        "rc_ration_card_type_code",
+    }:
+        if isinstance(value, list):
+            return [_normalize_text(v) for v in value]
+        return _normalize_text(value)
+    if field_name in {"annual_income", "age", "service_duration_months"}:
+        if isinstance(value, list):
+            normalized = []
+            for item in value:
+                if isinstance(item, (int, float)) and not isinstance(item, bool):
+                    normalized.append(float(item))
+            return normalized
+        return float(value)
+    if field_name in {
+        "is_disabled",
+        "ida_covered",
+        "rc_is_hof",
+        "receives_pension",
+        "retired_or_terminated",
+        "reemployed_same_factory",
+    }:
+        if isinstance(value, list):
+            return [_to_boolish(v) for v in value]
+        return _to_boolish(value)
+    if field_name == "member_dob":
+        if isinstance(value, list):
+            return [str(v).strip() for v in value]
+        return str(value).strip()
+    return value
+
+
+def _evaluate_operator(actual: Any, operator: str, expected: Any) -> bool:
+    if operator == "is_null":
+        return actual is None
+    if operator == "is_not_null":
+        return actual is not None
+    if actual is None:
+        return False
+    if operator == "=":
+        return actual == expected
+    if operator == "!=":
+        return actual != expected
+    if operator == ">":
+        return actual > expected
+    if operator == "<":
+        return actual < expected
+    if operator == ">=":
+        return actual >= expected
+    if operator == "<=":
+        return actual <= expected
+    if operator == "in":
+        return actual in (expected or [])
+    if operator == "not_in":
+        return actual not in (expected or [])
+    raise ValueError(f"Unsupported operator: {operator}")
+
+
+def _invert_operator_for_report(operator: str) -> str:
+    return {
+        "=": "!=",
+        "!=": "=",
+        ">": "<=",
+        "<": ">=",
+        ">=": "<",
+        "<=": ">",
+        "in": "not_in",
+        "not_in": "in",
+        "is_null": "is_not_null",
+        "is_not_null": "is_null",
+    }.get(operator, f"not_{operator}")
+
+
+def _evaluate_canonical_conditions(
+    citizen: Dict[str, Any],
+    conditions: List[Dict[str, Any]],
+    bucket: str,
+) -> tuple[List[Dict[str, Any]], List[str], bool]:
     checks: List[Dict[str, Any]] = []
-
-    dob = _parse_dob(citizen.get("member_dob"))
-    age = _calculate_age(dob)
-    gender = _normalize_text(citizen.get("gender"))
-    marital_status = _normalize_text(citizen.get("marital_status"))
-    current_scheme = _normalize_text(citizen.get("scheme_id"))
-
-    income_raw = citizen.get("annual_income")
-    income = _parse_amount(str(income_raw)) if income_raw is not None else None
-    employment_status = _normalize_text(citizen.get("employment_status"))
-    service_months = _to_int(citizen.get("service_duration_months"))
-    ida_covered = _to_boolish(citizen.get("ida_covered"))
-    receives_pension = _to_boolish(citizen.get("receives_pension"))
-    retired_or_terminated = _to_boolish(citizen.get("retired_or_terminated"))
-    reemployed_same_factory = _to_boolish(citizen.get("reemployed_same_factory"))
-
-    is_eligible = True
     missing_required_fields: List[str] = []
+    passed_all = True
 
-    if "age_min" in include:
-        passed = age is not None and age >= int(include["age_min"])
-        checks.append({"field": "age", "operator": ">=", "expected": include["age_min"], "actual": age, "passed": passed})
-        is_eligible = is_eligible and passed
+    for condition in conditions:
+        field_name = str(condition.get("field") or "").strip()
+        operator = str(condition.get("operator") or "").strip()
+        actual = _resolve_logical_field_value(citizen, field_name)
+        expected = _normalize_expected_value(field_name, condition.get("value"))
 
-    if "age_max" in include:
-        passed = age is not None and age <= int(include["age_max"])
-        checks.append({"field": "age", "operator": "<=", "expected": include["age_max"], "actual": age, "passed": passed})
-        is_eligible = is_eligible and passed
+        if _is_empty_manual_value(actual) and operator not in {"is_null", "is_not_null"}:
+            missing_required_fields.append(field_name)
+            continue
 
-    if "gender_in" in include:
-        expected = [str(x).upper() for x in include["gender_in"]]
-        passed = gender in expected
-        checks.append({"field": "gender", "operator": "in", "expected": expected, "actual": gender, "passed": passed})
-        is_eligible = is_eligible and passed
-
-    if "marital_status_in" in include:
-        expected = [str(x).upper() for x in include["marital_status_in"]]
-        passed = marital_status in expected
-        checks.append({"field": "marital_status", "operator": "in", "expected": expected, "actual": marital_status, "passed": passed})
-        is_eligible = is_eligible and passed
-
-    if "income_max" in include:
-        passed = income is not None and income <= float(include["income_max"])
-        checks.append({"field": "annual_income", "operator": "<=", "expected": include["income_max"], "actual": income, "passed": passed})
-        is_eligible = is_eligible and passed
-
-    if "employment_status_in" in include:
-        expected = [str(x).upper() for x in include["employment_status_in"]]
-        if not employment_status:
-            missing_required_fields.append("employment_status")
+        matched = _evaluate_operator(actual, operator, expected)
+        if bucket == "include":
+            passed = matched
+            reported_operator = operator
         else:
-            passed = employment_status in expected
-            checks.append({"field": "employment_status", "operator": "in", "expected": expected, "actual": employment_status, "passed": passed})
-            is_eligible = is_eligible and passed
+            passed = not matched
+            reported_operator = _invert_operator_for_report(operator)
 
-    if "min_service_months" in include:
-        expected_min = _to_int(include["min_service_months"])
-        if service_months is None or expected_min is None:
-            missing_required_fields.append("service_duration_months")
-        else:
-            passed = service_months >= expected_min
-            checks.append({"field": "service_duration_months", "operator": ">=", "expected": expected_min, "actual": service_months, "passed": passed})
-            is_eligible = is_eligible and passed
+        checks.append(
+            {
+                "field": field_name,
+                "operator": reported_operator,
+                "expected": expected,
+                "actual": actual,
+                "passed": passed,
+                "bucket": bucket,
+            }
+        )
+        passed_all = passed_all and passed
 
-    if include.get("ida_covered_required"):
-        if ida_covered is None:
-            missing_required_fields.append("ida_covered")
-        else:
-            passed = ida_covered is True
-            checks.append({"field": "ida_covered", "operator": "required_true", "expected": True, "actual": ida_covered, "passed": passed})
-            is_eligible = is_eligible and passed
+    return checks, missing_required_fields, passed_all
 
-    if include.get("requires_disability"):
-        disability_flag = _normalize_text(citizen.get("disability_status") or citizen.get("is_disabled"))
-        passed = disability_flag in {"YES", "Y", "TRUE", "1", "DISABLED"}
-        checks.append({"field": "disability_status", "operator": "required", "expected": True, "actual": disability_flag, "passed": passed})
-        is_eligible = is_eligible and passed
 
-    conflict_ids = [str(x).upper() for x in exclude.get("conflict_scheme_ids", [])]
-    if conflict_ids:
-        passed = current_scheme not in conflict_ids
-        checks.append({"field": "scheme_id", "operator": "not_in", "expected": conflict_ids, "actual": current_scheme, "passed": passed})
-        is_eligible = is_eligible and passed
+def _evaluate_unmapped_conditions(
+    citizen: Dict[str, Any], unmapped_conditions: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    non_blocking_keys = {"eligibility_scope", "exclusion_list"}
+    unresolved: List[Dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for condition in unmapped_conditions:
+        input_field = str(condition.get("suggested_input_field") or "").strip()
+        input_type = str(condition.get("input_type") or "text").strip().lower()
+        requirement_key = str(condition.get("requirement") or input_field).strip()
+        if requirement_key in non_blocking_keys:
+            continue
+        dedupe_key = input_field or requirement_key
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        if not input_field:
+            unresolved.append(condition)
+            continue
+        manual_value = citizen.get(input_field)
+        if _is_empty_manual_value(manual_value):
+            unresolved.append(condition)
+            continue
+        if input_type == "boolean" and _to_boolish(manual_value) is None:
+            unresolved.append(condition)
+    return unresolved
 
-    status_not_in = [str(x).upper() for x in exclude.get("employment_status_not_in", [])]
-    if status_not_in:
-        if not employment_status:
-            missing_required_fields.append("employment_status")
-        else:
-            passed = employment_status not in status_not_in
-            checks.append({"field": "employment_status", "operator": "not_in", "expected": status_not_in, "actual": employment_status, "passed": passed})
-            is_eligible = is_eligible and passed
 
-    if exclude.get("exclude_if_receives_pension"):
-        if receives_pension is None:
-            missing_required_fields.append("receives_pension")
-        else:
-            passed = receives_pension is False
-            checks.append({"field": "receives_pension", "operator": "must_be_false", "expected": False, "actual": receives_pension, "passed": passed})
-            is_eligible = is_eligible and passed
+def evaluate_citizen_against_rule(citizen: Dict[str, Any], rule: EligibilityRule) -> Dict[str, Any]:
+    canonical_rule = _get_canonical_rule_payload(rule)
+    include_conditions = canonical_rule.get("include_conditions", [])
+    exclude_conditions = canonical_rule.get("exclude_conditions", [])
+    unmapped_conditions = canonical_rule.get("unmapped_conditions", [])
 
-    if exclude.get("exclude_if_retired_or_terminated"):
-        if retired_or_terminated is None:
-            missing_required_fields.append("retired_or_terminated")
-        else:
-            passed = retired_or_terminated is False
-            checks.append({"field": "retired_or_terminated", "operator": "must_be_false", "expected": False, "actual": retired_or_terminated, "passed": passed})
-            is_eligible = is_eligible and passed
-
-    if exclude.get("exclude_if_reemployed_same_factory"):
-        if reemployed_same_factory is None:
-            missing_required_fields.append("reemployed_same_factory")
-        else:
-            passed = reemployed_same_factory is False
-            checks.append({"field": "reemployed_same_factory", "operator": "must_be_false", "expected": False, "actual": reemployed_same_factory, "passed": passed})
-            is_eligible = is_eligible and passed
-
+    current_scheme = _normalize_text(citizen.get("scheme_id"))
     target_scheme = _normalize_text(rule.scheme_id)
     is_enrolled_in_target = current_scheme == target_scheme
 
-    unmapped_criteria = extracted_meta.get("unmapped_criteria") or []
-    # Treat umbrella terms as non-blocking when we still have executable checks.
-    non_blocking_unmapped = {"eligibility_scope", "exclusion_list"}
-    initial_blocking = [u for u in unmapped_criteria if str(u) not in non_blocking_unmapped]
-    blocking_unmapped: List[str] = []
-    for raw in initial_blocking:
-        key = str(raw)
-        normalized = key.split(".")[-1]
-        mapped_fields = UNMAPPED_TO_MANUAL_FIELD_MAP.get(key) or UNMAPPED_TO_MANUAL_FIELD_MAP.get(normalized) or []
-        if not mapped_fields:
-            blocking_unmapped.append(key)
-            continue
-        resolved = any(not _is_empty_manual_value(citizen.get(f)) for f in mapped_fields)
-        if not resolved:
-            blocking_unmapped.append(key)
+    include_checks, include_missing, include_passed = _evaluate_canonical_conditions(
+        citizen, include_conditions, "include"
+    )
+    exclude_checks, exclude_missing, exclude_passed = _evaluate_canonical_conditions(
+        citizen, exclude_conditions, "exclude"
+    )
+    checks = include_checks + exclude_checks
+    missing_required_fields = sorted(set(include_missing + exclude_missing))
+    is_eligible = include_passed and exclude_passed
 
-    if unmapped_criteria:
-        if blocking_unmapped:
-            return {
-                "decision": "REVIEW_REQUIRED",
-                "reason": (
-                    "Document contains unresolved eligibility criteria requiring mapping or manual inputs: "
-                    + ", ".join(blocking_unmapped)
-                    + ". Manual or enriched mapping required before final decision."
-                ),
-                "decision_confidence": 0.0,
-                "is_eligible": False,
-                "is_enrolled_in_target": is_enrolled_in_target,
-                "checks": [],
-                "checked_fields": sorted({str(c.get("field")) for c in checks if c.get("field")}),
-                "missing_required_fields": [],
-                "blocking_unmapped_criteria": blocking_unmapped,
-            }
+    unresolved_unmapped = _evaluate_unmapped_conditions(citizen, unmapped_conditions)
+    blocking_unmapped = sorted(
+        {
+            str(item.get("suggested_input_field") or item.get("requirement") or "").strip()
+            for item in unresolved_unmapped
+            if str(item.get("suggested_input_field") or item.get("requirement") or "").strip()
+        }
+    )
 
-    has_criteria = bool(include) or bool(exclude)
+    has_criteria = bool(include_conditions) or bool(exclude_conditions) or bool(unmapped_conditions)
+    if blocking_unmapped:
+        return {
+            "decision": "REVIEW_REQUIRED",
+            "reason": (
+                "Document contains unresolved eligibility criteria requiring manual inputs: "
+                + ", ".join(blocking_unmapped)
+                + "."
+            ),
+            "decision_confidence": 0.0,
+            "is_eligible": False,
+            "is_enrolled_in_target": is_enrolled_in_target,
+            "checks": checks,
+            "checked_fields": sorted({str(c.get("field")) for c in checks if c.get("field")}),
+            "missing_required_fields": [],
+            "blocking_unmapped_criteria": blocking_unmapped,
+        }
+
     if not has_criteria:
         return {
             "decision": "REVIEW_REQUIRED",
@@ -929,7 +1163,9 @@ def evaluate_citizen_against_rule(citizen: Dict[str, Any], rule: EligibilityRule
         reason = (
             f"Citizen is eligible by extracted criteria but not enrolled in target scheme {target_scheme}. "
             + (
-                "Passed checks: " + "; ".join(_format_check_for_reason(c) for c in passed_checks) + "."
+                "Passed checks: "
+                + "; ".join(_format_check_for_reason(c) for c in passed_checks)
+                + "."
                 if passed_checks
                 else "No executable checks were available."
             )
@@ -939,7 +1175,9 @@ def evaluate_citizen_against_rule(citizen: Dict[str, Any], rule: EligibilityRule
         reason = (
             f"Citizen is enrolled in target scheme {target_scheme} but failed eligibility checks. "
             + (
-                "Failed checks: " + "; ".join(_format_check_for_reason(c) for c in failed_checks) + "."
+                "Failed checks: "
+                + "; ".join(_format_check_for_reason(c) for c in failed_checks)
+                + "."
                 if failed_checks
                 else "No failing check details available."
             )
@@ -949,19 +1187,18 @@ def evaluate_citizen_against_rule(citizen: Dict[str, Any], rule: EligibilityRule
         reason = f"Citizen is eligible and correctly enrolled in target scheme {target_scheme}."
     else:
         decision = "NOT_APPLICABLE"
-        reason = (
-            f"Citizen is not eligible and not enrolled in target scheme {target_scheme}. "
-            + (
-                "Failed checks: " + "; ".join(_format_check_for_reason(c) for c in failed_checks) + "."
-                if failed_checks
-                else "No failing check details available."
-            )
+        reason = f"Citizen is not eligible and not enrolled in target scheme {target_scheme}. " + (
+            "Failed checks: " + "; ".join(_format_check_for_reason(c) for c in failed_checks) + "."
+            if failed_checks
+            else "No failing check details available."
         )
 
     matched_checks = sum(1 for c in checks if c["passed"])
     total_checks = len(checks)
     base = 0.75
-    confidence = base if total_checks == 0 else min(0.99, base + (matched_checks / total_checks) * 0.2)
+    confidence = (
+        base if total_checks == 0 else min(0.99, base + (matched_checks / total_checks) * 0.2)
+    )
 
     return {
         "decision": decision,
@@ -1050,8 +1287,18 @@ async def create_rule_from_document(
 
     # LLM is the source-of-truth for executable eligibility conditions.
     # Regex output is retained only as a diagnostic backup for debugging.
-    include_conditions = llm_metadata.get("include_conditions") or {}
-    exclude_conditions = llm_metadata.get("exclude_conditions") or {}
+    canonical_rule = llm_metadata.get("canonical_rule")
+    if not isinstance(canonical_rule, dict):
+        canonical_rule = build_canonical_rule_from_legacy(
+            scheme_id=resolved_scheme_id,
+            rule_name=rule_name or f"Eligibility Rule - {resolved_scheme_id}",
+            include_conditions=regex_metadata.get("include_conditions") or {},
+            exclude_conditions=regex_metadata.get("exclude_conditions") or {},
+            unmapped_criteria=llm_metadata.get("unmapped_criteria") or [],
+        )
+
+    include_conditions = regex_metadata.get("include_conditions") or {}
+    exclude_conditions = regex_metadata.get("exclude_conditions") or {}
 
     metadata = {
         **llm_metadata,
@@ -1059,7 +1306,12 @@ async def create_rule_from_document(
         "include_conditions": include_conditions,
         "exclude_conditions": exclude_conditions,
         "extracted_fields": sorted(
-            set(list(include_conditions.keys()) + list(exclude_conditions.keys()))
+            {
+                str(item.get("field"))
+                for item in canonical_rule.get("include_conditions", [])
+                + canonical_rule.get("exclude_conditions", [])
+                if item.get("field")
+            }
         ),
         "regex_backup": regex_metadata,
         "decision_source": "llm_v2",
@@ -1069,6 +1321,7 @@ async def create_rule_from_document(
     metadata["scheme_detection_filename"] = filename_detection
     metadata["scheme_id_overridden"] = bool(scheme_id)
     metadata["scheme_id_resolved"] = resolved_scheme_id
+    metadata["canonical_rule"] = canonical_rule
 
     learning_summary = await learn_schema_from_metadata(session=session, metadata=metadata)
     metadata["schema_learning"] = learning_summary
@@ -1107,19 +1360,19 @@ async def create_rule_from_document(
 
 
 async def _get_beneficiary_columns(session: AsyncSession, schema: str, table: str) -> List[str]:
-    query = text(
-        """
+    query = text("""
         SELECT column_name
         FROM information_schema.columns
         WHERE table_schema = :schema AND table_name = :table
-        """
-    )
+        """)
     result = await session.execute(query, {"schema": schema, "table": table})
     rows = result.mappings().all()
     return [str(r.get("column_name")) for r in rows if r.get("column_name")]
 
 
-async def fetch_beneficiaries(session: AsyncSession, limit: int, offset: int = 0) -> List[Dict[str, Any]]:
+async def fetch_beneficiaries(
+    session: AsyncSession, limit: int, offset: int = 0
+) -> List[Dict[str, Any]]:
     schema = "srsadmin"
     table = "master_beneficiary_dataset"
     columns = await _get_beneficiary_columns(session, schema=schema, table=table)
@@ -1156,8 +1409,7 @@ async def fetch_beneficiaries(session: AsyncSession, limit: int, offset: int = 0
     if "uid" not in selected or "scheme_id" not in selected:
         raise ValueError("Beneficiary table must contain uid and scheme_id columns.")
 
-    query = text(
-        f"""
+    query = text(f"""
         WITH base AS (
             SELECT {', '.join(selected)}
             FROM {schema}.{table}
@@ -1180,8 +1432,7 @@ async def fetch_beneficiaries(session: AsyncSession, limit: int, offset: int = 0
             LIMIT 1
         ) rc ON TRUE
         ORDER BY base.uid
-        """
-    )
+        """)
     result = await session.execute(query, {"limit": limit, "offset": offset})
     rows = result.mappings().all()
     enriched: List[Dict[str, Any]] = []
@@ -1278,8 +1529,7 @@ async def fetch_citizen_evaluation_base(
         return await fetch_beneficiaries(session, limit=limit, offset=offset)
 
     if scheme_only:
-        query = text(
-            f"""
+        query = text(f"""
             SELECT m.*
             FROM {schema}.{table} m
             WHERE m.uid IS NOT NULL
@@ -1287,11 +1537,9 @@ async def fetch_citizen_evaluation_base(
               AND UPPER(BTRIM(m.scheme_id)) = :target_scheme_id
             ORDER BY m.uid
             LIMIT :limit OFFSET :offset
-            """
-        )
+            """)
     else:
-        query = text(
-            f"""
+        query = text(f"""
             WITH ranked AS (
                 SELECT
                     m.*,
@@ -1310,8 +1558,7 @@ async def fetch_citizen_evaluation_base(
             WHERE rn = 1
             ORDER BY uid
             LIMIT :limit OFFSET :offset
-            """
-        )
+            """)
 
     result = await session.execute(
         query,
@@ -1343,19 +1590,16 @@ async def fetch_single_citizen_evaluation_base(
         return None
 
     if scheme_only:
-        query = text(
-            f"""
+        query = text(f"""
             SELECT m.*
             FROM {schema}.{table} m
             WHERE m.uid = :uid
               AND UPPER(BTRIM(m.scheme_id)) = :target_scheme_id
             ORDER BY m.latest_transaction_timestamp DESC NULLS LAST, m.approved_date DESC NULLS LAST
             LIMIT 1
-            """
-        )
+            """)
     else:
-        query = text(
-            f"""
+        query = text(f"""
             SELECT m.*
             FROM {schema}.{table} m
             WHERE m.uid = :uid
@@ -1364,10 +1608,11 @@ async def fetch_single_citizen_evaluation_base(
                 m.latest_transaction_timestamp DESC NULLS LAST,
                 m.approved_date DESC NULLS LAST
             LIMIT 1
-            """
-        )
+            """)
 
-    result = await session.execute(query, {"uid": citizen_uid, "target_scheme_id": target_scheme_id})
+    result = await session.execute(
+        query, {"uid": citizen_uid, "target_scheme_id": target_scheme_id}
+    )
     row = result.mappings().first()
     if not row:
         return None
@@ -1381,6 +1626,7 @@ async def run_rule_evaluation(
     offset: int = 0,
     scheme_only: bool = True,
 ) -> Dict[str, Any]:
+    canonical_rule = _get_canonical_rule_payload(rule)
     target_scheme_id = _normalize_text(rule.scheme_id)
     citizens = await fetch_citizen_evaluation_base(
         session=session,
@@ -1432,7 +1678,9 @@ async def run_rule_evaluation(
                     else None
                 ),
                 citizen_scheme_id=(
-                    str(merged_citizen.get("scheme_id")) if merged_citizen.get("scheme_id") else None
+                    str(merged_citizen.get("scheme_id"))
+                    if merged_citizen.get("scheme_id")
+                    else None
                 ),
                 decision=decision,
                 reason=outcome["reason"],
@@ -1441,12 +1689,17 @@ async def run_rule_evaluation(
                     "citizen_name": merged_citizen.get("fullname"),
                     "checks": _to_json_safe(outcome["checks"]),
                     "checked_fields": _to_json_safe(outcome.get("checked_fields") or []),
-                    "missing_required_fields": _to_json_safe(outcome.get("missing_required_fields") or []),
-                    "blocking_unmapped_criteria": _to_json_safe(outcome.get("blocking_unmapped_criteria") or []),
+                    "missing_required_fields": _to_json_safe(
+                        outcome.get("missing_required_fields") or []
+                    ),
+                    "blocking_unmapped_criteria": _to_json_safe(
+                        outcome.get("blocking_unmapped_criteria") or []
+                    ),
                     "source_values": _build_source_value_snapshot(merged_citizen),
                     "manual_inputs": _to_json_safe(manual_by_uid.get(uid) or {}),
                     "include_conditions": _to_json_safe(rule.include_conditions),
                     "exclude_conditions": _to_json_safe(rule.exclude_conditions),
+                    "canonical_rule": _to_json_safe(canonical_rule),
                 },
                 identity_match_confidence=1.0,
                 decision_confidence=outcome["decision_confidence"],
@@ -1484,9 +1737,25 @@ async def run_rule_evaluation(
         "NOT_ELIGIBLE_NOT_ENROLLED": counts.get("NOT_APPLICABLE", 0),
         "REVIEW_REQUIRED": counts.get("REVIEW_REQUIRED", 0),
     }
-    unmapped_criteria = (rule.extracted_metadata or {}).get("unmapped_criteria") or []
-    executable_include_fields = sorted((rule.include_conditions or {}).keys())
-    executable_exclude_fields = sorted((rule.exclude_conditions or {}).keys())
+    unmapped_criteria = [
+        str(item.get("suggested_input_field") or item.get("requirement") or "").strip()
+        for item in canonical_rule.get("unmapped_conditions", [])
+        if str(item.get("suggested_input_field") or item.get("requirement") or "").strip()
+    ]
+    executable_include_fields = sorted(
+        {
+            str(item.get("field"))
+            for item in canonical_rule.get("include_conditions", [])
+            if item.get("field")
+        }
+    )
+    executable_exclude_fields = sorted(
+        {
+            str(item.get("field"))
+            for item in canonical_rule.get("exclude_conditions", [])
+            if item.get("field")
+        }
+    )
 
     return {
         "rule_id": rule.id,
