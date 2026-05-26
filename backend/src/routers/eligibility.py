@@ -95,7 +95,7 @@ def _suggest_manual_fields(evidence: dict) -> list[str]:
         canonical_rule.get("unmapped_conditions", []) if isinstance(canonical_rule, dict) else []
     ):
         field_name = str(condition.get("suggested_input_field") or "").strip()
-        if field_name:
+        if field_name and _is_empty_value(source_values.get(field_name)):
             suggested.append(field_name)
 
     for key in evidence.get("blocking_unmapped_criteria") or []:
@@ -144,6 +144,8 @@ def _manual_input_requirements(evidence: dict) -> list[dict]:
         }
 
     for field_name in _suggest_manual_fields(evidence):
+        if not _is_empty_value(source_values.get(field_name)):
+            continue
         if field_name in missing_required_fields or _is_empty_value(source_values.get(field_name)):
             reason = (
                 "Missing in the current citizen dataset row and required for executable evaluation."
@@ -240,6 +242,102 @@ async def list_rules(
     return {"total": len(rows), "rules": rows}
 
 
+@router.get("/rules/{rule_id}/manifest")
+async def get_rule_manifest(
+    rule_id: str,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a field-mapping manifest for a given eligibility rule."""
+    from src.services.eligibility_schema import FIELD_TYPES, MANUAL_ONLY_FIELD_TYPES, manual_input_type_for_field
+
+    rule = await session.get(EligibilityRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    canonical_rule = (rule.extracted_metadata or {}).get("canonical_rule") or {}
+
+    # Derive DB column name: same as field name (direct mapping from srsadmin table).
+    def _field_db_status(field_name: str) -> str:
+        if field_name in FIELD_TYPES:
+            return "MAPPED"
+        if field_name in MANUAL_ONLY_FIELD_TYPES:
+            return "MISSING"
+        # Derived fields like "age" computed from member_dob
+        if field_name == "age":
+            return "MAPPED_DERIVED"
+        return "MISSING"
+
+    def _field_db_column(field_name: str) -> Optional[str]:
+        derived = {"age": "member_dob (computed)"}
+        if field_name in derived:
+            return derived[field_name]
+        if field_name in FIELD_TYPES:
+            return field_name
+        return None
+
+    seen_fields: dict[str, dict] = {}
+
+    # Collect from mapped include/exclude conditions
+    for condition in (canonical_rule.get("include_conditions") or []):
+        field_name = str(condition.get("field") or "").strip()
+        if field_name and field_name not in seen_fields:
+            seen_fields[field_name] = {
+                "schemaField": field_name,
+                "db_column": _field_db_column(field_name),
+                "db_status": _field_db_status(field_name),
+                "value_type": FIELD_TYPES.get(field_name) or MANUAL_ONLY_FIELD_TYPES.get(field_name, "text"),
+                "note": f"Include condition: {condition.get('operator')} {condition.get('value')}",
+            }
+
+    for condition in (canonical_rule.get("exclude_conditions") or []):
+        field_name = str(condition.get("field") or "").strip()
+        if field_name and field_name not in seen_fields:
+            seen_fields[field_name] = {
+                "schemaField": field_name,
+                "db_column": _field_db_column(field_name),
+                "db_status": _field_db_status(field_name),
+                "value_type": FIELD_TYPES.get(field_name) or MANUAL_ONLY_FIELD_TYPES.get(field_name, "text"),
+                "note": f"Exclude condition: {condition.get('operator')} {condition.get('value')}",
+            }
+
+    # Collect from unmapped conditions
+    for condition in (canonical_rule.get("unmapped_conditions") or []):
+        field_name = str(condition.get("suggested_input_field") or "").strip()
+        if field_name and field_name not in seen_fields:
+            seen_fields[field_name] = {
+                "schemaField": field_name,
+                "db_column": _field_db_column(field_name),
+                "db_status": _field_db_status(field_name),
+                "value_type": condition.get("input_type") or manual_input_type_for_field(field_name),
+                "note": condition.get("reason_unmapped") or "Unmapped policy criterion requiring manual input.",
+            }
+
+    # Build manual input requirements from unmapped conditions only (rule-level, no citizen context).
+    manual_reqs = []
+    for condition in (canonical_rule.get("unmapped_conditions") or []):
+        field_name = str(condition.get("suggested_input_field") or "").strip()
+        if not field_name:
+            continue
+        manual_reqs.append({
+            "field": field_name,
+            "input_type": condition.get("input_type") or manual_input_type_for_field(field_name),
+            "required": True,
+            "reason": condition.get("reason_unmapped") or "Required to evaluate unmapped policy criterion.",
+        })
+
+    return {
+        "manifest_version": "1.0",
+        "rule_id": rule.id,
+        "scheme_id": rule.scheme_id,
+        "rule_name": rule.rule_name,
+        "rule_version": rule.rule_version,
+        "source_document_id": rule.document_id,
+        "source_filename": rule.source_filename,
+        "field_mapping": list(seen_fields.values()),
+        "manual_input_requirements": manual_reqs,
+    }
+
+
 @router.post("/evaluate/{rule_id}")
 async def evaluate_rule(
     rule_id: str,
@@ -323,19 +421,20 @@ async def list_decisions(
     query = query.limit(limit)
     result = await session.exec(query)
     rows = result.all()
+
+    # Batch-fetch rules (at most a handful of unique rule IDs).
     rule_ids = sorted({str(r.rule_id) for r in rows if getattr(r, "rule_id", None)})
     rule_by_id: dict[str, EligibilityRule] = {}
-    for rule_id in rule_ids:
-        rule = await session.get(EligibilityRule, rule_id)
+    for rid in rule_ids:
+        rule = await session.get(EligibilityRule, rid)
         if rule is not None:
-            rule_by_id[rule_id] = rule
+            rule_by_id[rid] = rule
 
-    # Enrich with citizen_name (prefer saved evidence, fallback to srsadmin lookup).
-    uids = [str(r.citizen_uid) for r in rows if getattr(r, "citizen_uid", None)]
-    uid_to_name = {}
+    # Batch-fetch citizen names with a single IN query instead of per-UID queries.
+    uids = list({str(r.citizen_uid) for r in rows if getattr(r, "citizen_uid", None)})
+    uid_to_name: dict[str, str] = {}
     if uids:
         try:
-            # Detect name column in srsadmin table to avoid schema variance issues.
             col_stmt = text("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -345,31 +444,25 @@ async def list_decisions(
             cols_result = await session.execute(col_stmt)
             available_cols = {str(r[0]).lower() for r in cols_result.fetchall()}
 
-            name_col = None
-            for candidate in ["fullname", "full_name", "name", "citizen_name"]:
-                if candidate in available_cols:
-                    name_col = candidate
-                    break
-
+            name_col = next(
+                (c for c in ["fullname", "full_name", "name", "citizen_name"] if c in available_cols),
+                None,
+            )
             if name_col:
-                # Per-UID lookup is intentionally used for portability with text() SQL binds.
-                fetch_stmt = text(f"""
-                    SELECT uid, {name_col} AS citizen_name
+                # Single batch query using ANY for all UIDs at once.
+                batch_stmt = text(f"""
+                    SELECT DISTINCT ON (uid) uid, {name_col} AS citizen_name
                     FROM srsadmin.swasthya_sathi_beneficiary
-                    WHERE uid = :uid
-                    LIMIT 1
+                    WHERE uid = ANY(:uids)
+                    ORDER BY uid
                     """)
-                for uid in sorted(set(uids)):
-                    row_result = await session.execute(fetch_stmt, {"uid": uid})
-                    row = row_result.mappings().first()
-                    if row and row.get("citizen_name"):
-                        uid_to_name[uid] = row.get("citizen_name")
+                batch_result = await session.execute(batch_stmt, {"uids": uids})
+                for name_row in batch_result.mappings().all():
+                    if name_row.get("citizen_name"):
+                        uid_to_name[str(name_row["uid"])] = str(name_row["citizen_name"])
         except Exception as exc:
-            # Keep API non-blocking; decisions still return even if name enrichment fails.
-            # UI will show '-' for unresolved names.
             uid_to_name = {}
             from src.core.logger import logger
-
             logger.warning(f"Eligibility decisions name enrichment failed: {exc}")
 
     serialized = []

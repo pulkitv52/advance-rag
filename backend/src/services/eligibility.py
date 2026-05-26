@@ -1077,8 +1077,14 @@ def _evaluate_unmapped_conditions(
     return unresolved
 
 
-def evaluate_citizen_against_rule(citizen: Dict[str, Any], rule: EligibilityRule) -> Dict[str, Any]:
-    canonical_rule = _get_canonical_rule_payload(rule)
+def evaluate_citizen_against_rule(
+    citizen: Dict[str, Any],
+    rule: EligibilityRule,
+    canonical_rule: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Evaluate one citizen. Pass canonical_rule from a bulk loop to skip re-validation."""
+    if canonical_rule is None:
+        canonical_rule = _get_canonical_rule_payload(rule)
     include_conditions = canonical_rule.get("include_conditions", [])
     exclude_conditions = canonical_rule.get("exclude_conditions", [])
     unmapped_conditions = canonical_rule.get("unmapped_conditions", [])
@@ -1359,7 +1365,14 @@ async def create_rule_from_document(
     return rule
 
 
+# Module-level cache: avoids repeated slow information_schema queries per request.
+_column_cache: Dict[str, List[str]] = {}
+
+
 async def _get_beneficiary_columns(session: AsyncSession, schema: str, table: str) -> List[str]:
+    cache_key = f"{schema}.{table}"
+    if cache_key in _column_cache:
+        return _column_cache[cache_key]
     query = text("""
         SELECT column_name
         FROM information_schema.columns
@@ -1367,7 +1380,10 @@ async def _get_beneficiary_columns(session: AsyncSession, schema: str, table: st
         """)
     result = await session.execute(query, {"schema": schema, "table": table})
     rows = result.mappings().all()
-    return [str(r.get("column_name")) for r in rows if r.get("column_name")]
+    columns = [str(r.get("column_name")) for r in rows if r.get("column_name")]
+    if columns:
+        _column_cache[cache_key] = columns
+    return columns
 
 
 async def fetch_beneficiaries(
@@ -1658,14 +1674,23 @@ async def run_rule_evaluation(
         "REVIEW_REQUIRED": 0,
     }
 
+    # Delete stale decisions before re-evaluating to prevent row accumulation.
+    await session.execute(
+        text("DELETE FROM eligibility_decisions WHERE rule_id = :rule_id"),
+        {"rule_id": rule.id},
+    )
+    await session.flush()
+
     saved = 0
     preview: List[Dict[str, Any]] = []
+    BATCH_SIZE = 100
 
     for citizen in citizens:
         try:
             uid = str(citizen.get("uid") or "")
             merged_citizen = {**citizen, **(manual_by_uid.get(uid) or {})}
-            outcome = evaluate_citizen_against_rule(merged_citizen, rule)
+            # Pass pre-computed canonical_rule to skip 500x Pydantic re-validation.
+            outcome = evaluate_citizen_against_rule(merged_citizen, rule, canonical_rule)
             decision = outcome["decision"]
             counts[decision] = counts.get(decision, 0) + 1
 
@@ -1706,6 +1731,10 @@ async def run_rule_evaluation(
             )
             session.add(decision_row)
             saved += 1
+
+            # Flush in batches to release ORM identity-map memory.
+            if saved % BATCH_SIZE == 0:
+                await session.flush()
 
             if len(preview) < 25 and decision in {
                 "INCLUSION_ERROR",

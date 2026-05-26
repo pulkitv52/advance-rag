@@ -10,6 +10,9 @@ import {
   Info,
   ExternalLink,
   Plus,
+  MessageSquareText,
+  CheckSquare,
+  Landmark,
 } from 'lucide-react'
 import ForceGraph2D from 'react-force-graph-2d'
 import axios from 'axios'
@@ -147,6 +150,107 @@ interface Project {
   description?: string | null
   created_at: string
 }
+
+// Unified parser to render text content by converting <br> tags into <br /> elements
+// and literal source references (e.g. 【Source X】 or [Source X]) into interactive badges.
+const renderTextContent = (text: string, sources: Source[], setSelectedSource: (src: any) => void): React.ReactNode => {
+  if (text.toLowerCase().includes('<br')) {
+    const parts = text.split(/<br\s*\/?>/gi);
+    return (
+      <>
+        {parts.map((part, index) => (
+          <React.Fragment key={index}>
+            {renderTextContent(part, sources, setSelectedSource)}
+            {index < parts.length - 1 && <br />}
+          </React.Fragment>
+        ))}
+      </>
+    );
+  }
+
+  const citationRegex = /(?:【|\[)Source\s*(\d+)(?:】|\])/gi;
+  if (citationRegex.test(text)) {
+    citationRegex.lastIndex = 0;
+    const elements: React.ReactNode[] = [];
+    let match;
+    let lastIndex = 0;
+
+    while ((match = citationRegex.exec(text)) !== null) {
+      const matchIndex = match.index;
+      const citationText = match[0];
+      const sourceNum = parseInt(match[1], 10);
+      
+      if (matchIndex > lastIndex) {
+        elements.push(text.substring(lastIndex, matchIndex));
+      }
+
+      const sourceIndex = sourceNum - 1;
+      const source = sources && sources[sourceIndex];
+      if (source) {
+        const baseName = source.filename.split(/[/\\]/).pop() || source.filename;
+        const cleanName = baseName.replace(/\.pdf$/i, '');
+        const displayName = cleanName.length > 20 ? cleanName.substring(0, 17) + '...' : cleanName;
+        const sourceLabel = source.page ? `${displayName} (p. ${source.page})` : displayName;
+
+        elements.push(
+          <TooltipProvider key={`citation-${matchIndex}`}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  onClick={() => setSelectedSource(source)}
+                  className="inline-flex items-center gap-1 bg-slate-100 text-slate-900 px-2 py-0.5 rounded-md font-bold text-[10px] cursor-pointer hover:bg-slate-900 hover:text-white transition-colors mx-0.5 align-middle font-sans"
+                >
+                  <FileText className="w-2.5 h-2.5 shrink-0 text-slate-500" />
+                  {sourceLabel}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="bg-slate-900 text-white border-none p-3 rounded-xl shadow-2xl font-sans">
+                <div className="space-y-1">
+                  <p className="text-[10px] font-bold truncate max-w-[200px]">{source.filename}</p>
+                  <p className="text-[9px] text-slate-400 font-medium uppercase tracking-tighter">Verified Grounding | Page {source.page || 'N/A'}</p>
+                </div>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        );
+      } else {
+        elements.push(citationText);
+      }
+
+      lastIndex = citationRegex.lastIndex;
+    }
+
+    if (lastIndex < text.length) {
+      elements.push(text.substring(lastIndex));
+    }
+
+    return <>{elements}</>;
+  }
+
+  return text;
+};
+
+const renderWithLineBreaksAndCitations = (content: any, sources: Source[], setSelectedSource: (src: any) => void): any => {
+  if (typeof content === 'string') {
+    return renderTextContent(content, sources, setSelectedSource);
+  }
+  if (Array.isArray(content)) {
+    return content.map((child, index) => (
+      <React.Fragment key={index}>
+        {renderWithLineBreaksAndCitations(child, sources, setSelectedSource)}
+      </React.Fragment>
+    ));
+  }
+  if (React.isValidElement(content)) {
+    const element = content as React.ReactElement<any>;
+    if (element.props && element.props.children) {
+      return React.cloneElement(element, {
+        children: renderWithLineBreaksAndCitations(element.props.children, sources, setSelectedSource)
+      } as any);
+    }
+  }
+  return content;
+};
 
 interface SavedReport {
   id: string
@@ -800,8 +904,16 @@ export default function App() {
   return (
     <div className="flex h-screen w-full bg-[#f8f9fa] text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden">
       <TooltipProvider>
-        {/* ── Left Sidebar: Navigation ── */}
-        <nav className="w-48 flex flex-col py-6 border-r border-slate-200 bg-white shrink-0 z-30 px-5">
+        <Tabs
+          value={activeTab}
+          onValueChange={(val: string) => {
+            setActiveTab(val);
+            if (val === 'map') fetchGraph();
+          }}
+          className="flex h-screen w-full overflow-hidden flex-1"
+        >
+          {/* ── Left Sidebar: Navigation ── */}
+          <nav className="w-48 flex flex-col py-6 border-r border-slate-200 bg-white shrink-0 z-30 px-5">
           <div className="mb-10 w-full flex justify-center">
             <img src="/kpmg_logo.png" alt="KPMG" className="w-20 h-auto object-contain" />
           </div>
@@ -819,6 +931,43 @@ export default function App() {
                 <option key={project.id} value={project.id}>{project.name}</option>
               ))}
             </select>
+          </div>
+
+          {/* Sidebar Navigation Tabs */}
+          <div className="flex-1 w-full py-6 space-y-1">
+            <div className="px-1 mb-3">
+              <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">Intelligence Hub</h2>
+            </div>
+            <TabsList className="flex flex-col bg-transparent p-0 rounded-none h-auto w-full gap-1.5 border-none">
+              <TabsTrigger
+                value="research"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+              >
+                <MessageSquareText className="w-4 h-4 shrink-0" />
+                Research Chat
+              </TabsTrigger>
+              <TabsTrigger
+                value="map"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+              >
+                <Network className="w-4 h-4 shrink-0" />
+                Knowledge Map
+              </TabsTrigger>
+              <TabsTrigger
+                value="eligibility"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+              >
+                <CheckSquare className="w-4 h-4 shrink-0" />
+                Eligibility
+              </TabsTrigger>
+              <TabsTrigger
+                value="registry"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+              >
+                <Landmark className="w-4 h-4 shrink-0" />
+                Social Registry
+              </TabsTrigger>
+            </TabsList>
           </div>
 
           <div className="mt-auto w-full flex items-center justify-between px-2">
@@ -865,45 +1014,17 @@ export default function App() {
               </div>
             </header>
 
-            <Tabs
-              value={activeTab}
-              onValueChange={(val: string) => {
-                setActiveTab(val);
-                if (val === 'map') fetchGraph();
-              }}
-              className="flex-1 flex flex-col overflow-hidden min-h-0"
-            >
-              {/* Global Tab List (Hidden when Registry is Active to avoid double nav) */}
-              <div className={`absolute top-4 left-10 z-20 shrink-0 ${activeTab === 'registry' ? 'hidden' : ''}`}>
-                <TabsList className="bg-white/80 backdrop-blur-md border border-slate-200 p-1 rounded-xl h-10 w-fit shadow-sm">
-                  <TabsTrigger value="research" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Research Chat</TabsTrigger>
-                  <TabsTrigger value="map" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Knowledge Map</TabsTrigger>
-                  <TabsTrigger value="eligibility" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Eligibility</TabsTrigger>
-                  <TabsTrigger value="registry" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">🏛 Social Registry</TabsTrigger>
-                </TabsList>
-              </div>
+            <div className="flex-1 flex flex-col overflow-hidden min-h-0">
               {/* ── Social Registry Dashboard Tab ── */}
-              <TabsContent value="registry" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none bg-[#fcfdfe] data-[state=inactive]:hidden data-[state=active]:flex">
-                {activeTab === 'registry' && (
-                  <UsrDashboard
-                    API={API}
-                    navArea={
-                      <TabsList className="bg-slate-100/50 border border-slate-200 p-1 rounded-xl h-10 w-fit">
-                        <TabsTrigger value="research" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Research Chat</TabsTrigger>
-                        <TabsTrigger value="map" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Knowledge Map</TabsTrigger>
-                        <TabsTrigger value="eligibility" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Eligibility</TabsTrigger>
-                        <TabsTrigger value="registry" className="rounded-lg px-6 text-[11px] font-bold uppercase tracking-widest data-[state=active]:bg-white data-[state=active]:shadow-sm">Social Registry</TabsTrigger>
-                      </TabsList>
-                    }
-                  />
-                )}
+              <TabsContent value="registry" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none bg-[#fcfdfe] data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
+                <UsrDashboard API={API} />
               </TabsContent>
 
-              <TabsContent value="eligibility" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex">
+              <TabsContent value="eligibility" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
                 <EligibilityStudio API={API} />
               </TabsContent>
 
-              <TabsContent value="research" className="flex-1 flex flex-col overflow-hidden min-h-0 mt-0 m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex">
+              <TabsContent value="research" className="flex-1 flex flex-col overflow-hidden min-h-0 mt-0 m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
                 <ScrollArea className="flex-1 h-full">
                   <div className="max-w-4xl mx-auto px-10 pt-14 pb-32 space-y-12">
                     {/* Hero Area */}
@@ -968,15 +1089,20 @@ export default function App() {
                                     const index = parseInt(props.href!.split('-')[1]) - 1;
                                     const source = result.sources[index];
                                     if (source) {
+                                      const baseName = source.filename.split(/[/\\]/).pop() || source.filename;
+                                      const cleanName = baseName.replace(/\.pdf$/i, '');
+                                      const displayName = cleanName.length > 20 ? cleanName.substring(0, 17) + '...' : cleanName;
+                                      const sourceLabel = source.page ? `${displayName} (p. ${source.page})` : displayName;
                                       return (
                                         <TooltipProvider>
                                           <Tooltip>
                                             <TooltipTrigger asChild>
                                               <span
                                                 onClick={() => setSelectedSource(source)}
-                                                className="inline-flex items-center justify-center bg-slate-100 text-slate-900 px-1.5 py-0 rounded font-bold text-[10px] cursor-pointer hover:bg-slate-900 hover:text-white transition-colors mx-0.5"
+                                                className="inline-flex items-center gap-1 bg-slate-100 text-slate-900 px-2 py-0.5 rounded-md font-bold text-[10px] cursor-pointer hover:bg-slate-900 hover:text-white transition-colors mx-0.5"
                                               >
-                                                {props.children}
+                                                <FileText className="w-2.5 h-2.5 shrink-0 text-slate-500" />
+                                                {sourceLabel}
                                               </span>
                                             </TooltipTrigger>
                                             <TooltipContent className="bg-slate-900 text-white border-none p-3 rounded-xl shadow-2xl">
@@ -1011,7 +1137,11 @@ export default function App() {
                                   }
 
                                   return <code className={className} {...props}>{children}</code>;
-                                }
+                                },
+                                p: ({ node, ...props }) => <p {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</p>,
+                                td: ({ node, ...props }) => <td {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</td>,
+                                th: ({ node, ...props }) => <th {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</th>,
+                                li: ({ node, ...props }) => <li {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</li>
                               }}
                             >
                               {result.answer}
@@ -1073,7 +1203,7 @@ export default function App() {
                 </div>
               </TabsContent>
 
-              <TabsContent value="map" className="flex-1 relative overflow-hidden min-h-0 mt-0 m-0 p-0 outline-none border-none bg-white h-full min-h-[700px] data-[state=inactive]:hidden data-[state=active]:block">
+              <TabsContent value="map" className="flex-1 relative overflow-hidden min-h-0 mt-0 m-0 p-0 outline-none border-none bg-white h-full min-h-[700px] data-[state=inactive]:hidden data-[state=active]:block" forceMount>
                 {loadingGraph ? (
                   <div className="flex flex-col items-center justify-center h-full gap-6">
                     <div className="relative">
@@ -1268,7 +1398,7 @@ export default function App() {
               </TabsContent>
 
 
-            </Tabs>
+            </div>
 
           </div>
 
@@ -1320,6 +1450,7 @@ export default function App() {
             )}
           </aside>
         </main>
+        </Tabs>
       </TooltipProvider>
     </div>
   )

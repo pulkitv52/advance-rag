@@ -19,6 +19,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from src.core.database import get_session
 from src.core.logger import logger
 from src.models.document import Document
+from src.models.eligibility import EligibilityDecision, EligibilityManualInput, EligibilityRule
 from src.models.project import Project, ProjectDocument
 from src.services import graph_db, processor, storage
 
@@ -310,7 +311,40 @@ async def delete_document(document_id: str, session: AsyncSession = Depends(get_
 
     await graph_db.delete_document_triplets(document_id)
 
+    # Delete extracted eligibility artifacts linked to this document.
+    rules_result = await session.exec(
+        select(EligibilityRule).where(EligibilityRule.document_id == document_id)
+    )
+    rules = rules_result.all()
+    rule_ids = [str(rule.id) for rule in rules]
+
+    for rid in rule_ids:
+        manual_result = await session.exec(
+            select(EligibilityManualInput).where(EligibilityManualInput.rule_id == rid)
+        )
+        for manual in manual_result.all():
+            await session.delete(manual)
+
+        decision_result = await session.exec(
+            select(EligibilityDecision).where(EligibilityDecision.rule_id == rid)
+        )
+        for decision in decision_result.all():
+            await session.delete(decision)
+
+    for rule in rules:
+        await session.delete(rule)
+
+    # Remove project-document links.
+    pd_result = await session.exec(
+        select(ProjectDocument).where(ProjectDocument.document_id == document_id)
+    )
+    for pd_row in pd_result.all():
+        await session.delete(pd_row)
+
     await session.delete(doc)
     await session.commit()
 
-    return {"message": f"Document '{doc.filename}' deleted successfully."}
+    return {
+        "message": f"Document '{doc.filename}' deleted successfully.",
+        "deleted_rule_count": len(rule_ids),
+    }

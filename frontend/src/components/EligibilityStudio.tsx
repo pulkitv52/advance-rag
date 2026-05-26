@@ -63,6 +63,31 @@ interface ManualInputRequirement {
   requirement?: string
 }
 
+interface RuleManifestField {
+  schemaField: string
+  db_column?: string | null
+  db_status: "MAPPED" | "MAPPED_PROXY" | "MAPPED_DERIVED" | "MISSING" | string
+  value_type?: string
+  note?: string
+}
+
+interface RuleManifest {
+  manifest_version: string
+  scheme_id: string
+  rule_id: string
+  rule_name: string
+  rule_version: number
+  source_document_id?: string | null
+  source_filename?: string | null
+  field_mapping: RuleManifestField[]
+  manual_input_requirements?: Array<{
+    field: string
+    input_type: string
+    required: boolean
+    reason?: string
+  }>
+}
+
 interface DecisionRow {
   id: string
   citizen_uid: string
@@ -176,6 +201,50 @@ const describeCondition = (condition: CanonicalCondition): string => {
   return `${condition.field} ${condition.operator}${valuePart}`
 }
 
+
+
+const CONCEPT_TO_DB_FIELD_MAP: Record<string, string> = {
+  caste_category: "caste",
+  eligible_caste: "caste",
+  caste_eligibility: "caste",
+  beneficiary_category: "caste",
+  income_limit: "annual_income",
+  gender_restriction: "gender",
+  gender_restriction_boys: "gender",
+  institution_eligibility: "institution_type",
+  institution_code: "institution_type",
+  institution_standard: "institution_type",
+  institution_criteria: "institution_type",
+  course_level: "course_level",
+  course_eligibility: "course_level",
+  course_mode: "study_mode",
+  online_course_eligibility: "study_mode",
+  study_mode: "study_mode",
+  no_other_scholarship: "no_other_scholarship",
+  single_scholarship_rule: "no_other_scholarship",
+  other_scholarship_exclusion: "no_other_scholarship",
+  single_other_scholarship_exclusion: "no_other_scholarship",
+  nationality: "nationality",
+  eligible_nationality: "nationality",
+  medical_allowance_opt_in: "medical_allowance_opt_in",
+}
+
+const getDBValueForField = (dbValues: Record<string, any> | undefined | null, field: string): any => {
+  if (!dbValues) return undefined
+  if (dbValues[field] !== undefined && dbValues[field] !== null) {
+    return dbValues[field]
+  }
+  const normalizedField = field.trim().toLowerCase()
+  if (dbValues[normalizedField] !== undefined && dbValues[normalizedField] !== null) {
+    return dbValues[normalizedField]
+  }
+  const dbKey = CONCEPT_TO_DB_FIELD_MAP[normalizedField]
+  if (dbKey && dbValues[dbKey] !== undefined && dbValues[dbKey] !== null) {
+    return dbValues[dbKey]
+  }
+  return undefined
+}
+
 export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [documents, setDocuments] = useState<DocumentRow[]>([])
   const [rules, setRules] = useState<RuleRow[]>([])
@@ -190,14 +259,14 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [evaluating, setEvaluating] = useState(false)
   const [uploadingPolicy, setUploadingPolicy] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
-  const [loadingDocs, setLoadingDocs] = useState(false)
-  const [loadingRules, setLoadingRules] = useState(false)
   const [loadingDecisions, setLoadingDecisions] = useState(false)
+  const [loadingManifest, setLoadingManifest] = useState(false)
   const [showAllDecisions, setShowAllDecisions] = useState(false)
 
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
   const [latestSummary, setLatestSummary] = useState<EvaluationSummary | null>(null)
+  const [ruleManifest, setRuleManifest] = useState<RuleManifest | null>(null)
   const [operationLabel, setOperationLabel] = useState("")
   const [operationProgress, setOperationProgress] = useState(0)
   const [operationActive, setOperationActive] = useState(false)
@@ -213,6 +282,32 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     () => documents.filter((doc) => doc.status === "success"),
     [documents],
   )
+
+  const latestRulesByScheme = useMemo(() => {
+    const byScheme = new Map<string, RuleRow>()
+    for (const rule of rules) {
+      const key = String(rule.scheme_id || "").trim() || "__UNKNOWN__"
+      const current = byScheme.get(key)
+      if (!current) {
+        byScheme.set(key, rule)
+        continue
+      }
+      const currentVersion = Number(current.rule_version || 0)
+      const nextVersion = Number(rule.rule_version || 0)
+      if (nextVersion > currentVersion) {
+        byScheme.set(key, rule)
+        continue
+      }
+      if (nextVersion === currentVersion) {
+        const currentCreated = new Date(current.created_at || 0).getTime()
+        const nextCreated = new Date(rule.created_at || 0).getTime()
+        if (nextCreated > currentCreated) {
+          byScheme.set(key, rule)
+        }
+      }
+    }
+    return Array.from(byScheme.values())
+  }, [rules])
 
   const beginOperationProgress = (label: string) => {
     if (progressTimerRef.current) {
@@ -246,8 +341,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }, 900)
   }
 
-  const loadDocuments = useCallback(async (silent = false) => {
-    if (!silent) setLoadingDocs(true)
+  const loadDocuments = useCallback(async (_silent = false) => {
     try {
       const res = await axios.get(`${API}/documents/`)
       const docs = (res.data?.documents || []) as DocumentRow[]
@@ -258,13 +352,10 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       }
     } catch (e: any) {
       setError(e?.response?.data?.detail || "Failed to load documents")
-    } finally {
-      if (!silent) setLoadingDocs(false)
     }
   }, [API, selectedDocumentId])
 
-  const loadRules = useCallback(async (scheme?: string, silent = false) => {
-    if (!silent) setLoadingRules(true)
+  const loadRules = useCallback(async (scheme?: string, _silent = false) => {
     try {
       const params = new URLSearchParams()
       if (scheme) params.set("scheme_id", scheme)
@@ -272,19 +363,28 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       const res = await axios.get(`${API}/api/eligibility/rules${query ? `?${query}` : ""}`)
       const rows = (res.data?.rules || []) as RuleRow[]
       setRules(rows)
-      if (!selectedRuleId && rows.length > 0) {
+      if (rows.length === 0) {
+        setSelectedRuleId("")
+      } else if (!selectedRuleId || !rows.some((row) => row.id === selectedRuleId)) {
         setSelectedRuleId(rows[0].id)
       }
+      return rows
     } catch (e: any) {
       setError(e?.response?.data?.detail || "Failed to load rules")
-    } finally {
-      if (!silent) setLoadingRules(false)
+      return [] as RuleRow[]
     }
   }, [API, selectedRuleId])
 
-  const loadDecisions = useCallback(async (ruleId?: string, silent = false) => {
-    const targetRule = showAllDecisions ? "" : (ruleId || selectedRuleId)
-    if (!showAllDecisions && !targetRule) return
+  // Stable refs for values that change but shouldn't cause callback recreation.
+  const selectedRuleIdRef = useRef(selectedRuleId)
+  const showAllDecisionsRef = useRef(showAllDecisions)
+  useEffect(() => { selectedRuleIdRef.current = selectedRuleId }, [selectedRuleId])
+  useEffect(() => { showAllDecisionsRef.current = showAllDecisions }, [showAllDecisions])
+
+  const loadDecisions = useCallback(async (ruleId?: string, silent = false, forceAll = false) => {
+    const includeAll = forceAll || showAllDecisionsRef.current
+    const targetRule = includeAll ? "" : (ruleId || selectedRuleIdRef.current)
+    if (!includeAll && !targetRule) return
 
     if (!silent) setLoadingDecisions(true)
     try {
@@ -298,7 +398,25 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     } finally {
       if (!silent) setLoadingDecisions(false)
     }
-  }, [API, selectedRuleId, showAllDecisions])
+  }, [API])
+
+  const loadRuleManifest = useCallback(async (ruleId?: string, silent = false) => {
+    const targetRule = ruleId || selectedRuleIdRef.current
+    if (!targetRule) {
+      setRuleManifest(null)
+      return
+    }
+    if (!silent) setLoadingManifest(true)
+    try {
+      const res = await axios.get(`${API}/api/eligibility/rules/${targetRule}/manifest`)
+      setRuleManifest((res.data || null) as RuleManifest | null)
+    } catch (e: any) {
+      setRuleManifest(null)
+      if (!silent) setError(e?.response?.data?.detail || "Failed to load rule manifest")
+    } finally {
+      if (!silent) setLoadingManifest(false)
+    }
+  }, [API])
 
   const handleExtract = async () => {
     if (!selectedDocumentId) {
@@ -437,7 +555,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       const totalRules = Number(res.data?.total_rules || 0)
       setSuccess(`Evaluation completed for ${totalRules} active rules.`)
       setShowAllDecisions(true)
-      await loadDecisions(undefined)
+      await loadDecisions(undefined, false, true)
       completeOperationProgress("Evaluation for all rules completed.")
     } catch (e: any) {
       setError(e?.response?.data?.detail || "Evaluate-all failed")
@@ -462,6 +580,37 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     if (["TRUE", "YES", "Y", "1"].includes(upper)) return true
     if (["FALSE", "NO", "N", "0"].includes(upper)) return false
     return v
+  }
+
+  const handleDeleteSelectedDocument = async () => {
+    if (!selectedDocumentId) {
+      setError("Select a document first.")
+      return
+    }
+    const doc = readyDocuments.find((d) => d.id === selectedDocumentId)
+    const docLabel = doc?.filename || selectedDocumentId
+    const confirmed = window.confirm(
+      `Delete '${docLabel}'?\n\nThis will also delete extracted rules and related decisions/manual inputs for this document.`,
+    )
+    if (!confirmed) return
+
+    setError(null)
+    setSuccess(null)
+    beginOperationProgress("Deleting document and linked eligibility artifacts...")
+    try {
+      const res = await axios.delete(`${API}/documents/${selectedDocumentId}`)
+      await loadDocuments()
+      await loadRules(schemeId.trim() || undefined)
+      await loadDecisions(undefined, false, true)
+      setSelectedDocumentId("")
+      setSuccess(
+        `${res.data?.message || "Document deleted."} Rules deleted: ${Number(res.data?.deleted_rule_count || 0)}`,
+      )
+      completeOperationProgress("Document and linked rules deleted.")
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Failed to delete document")
+      completeOperationProgress("Delete failed.")
+    }
   }
 
   const handleRejudge = async (row: DecisionRow) => {
@@ -538,30 +687,44 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     lastAutoFilledDocIdRef.current = selectedDocumentId
   }, [documents, selectedDocumentId])
 
+  // Refs to track latest volatile state inside the stable polling interval.
+  const evaluatingRef = useRef(evaluating)
+  const operationActiveRef = useRef(operationActive)
+  const extractingRef = useRef(extracting)
+  const schemeIdRef = useRef(schemeId)
+  useEffect(() => { evaluatingRef.current = evaluating }, [evaluating])
+  useEffect(() => { operationActiveRef.current = operationActive }, [operationActive])
+  useEffect(() => { extractingRef.current = extracting }, [extracting])
+  useEffect(() => { schemeIdRef.current = schemeId }, [schemeId])
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       void loadDocuments(true)
 
-      if (extracting) {
-        void loadRules(schemeId.trim() || undefined, true)
+      if (extractingRef.current) {
+        void loadRules(schemeIdRef.current.trim() || undefined, true)
       }
 
-      if (selectedRuleId && (evaluating || operationActive)) {
-        void loadDecisions(selectedRuleId, true)
+      const ruleId = selectedRuleIdRef.current
+      if (ruleId && (evaluatingRef.current || operationActiveRef.current)) {
+        void loadDecisions(ruleId, true)
+      }
+      if (ruleId && (extractingRef.current || evaluatingRef.current || operationActiveRef.current)) {
+        void loadRuleManifest(ruleId, true)
       }
     }, 4000)
 
     return () => window.clearInterval(timer)
-  }, [
-    loadDocuments,
-    loadRules,
-    loadDecisions,
-    selectedRuleId,
-    evaluating,
-    operationActive,
-    extracting,
-    schemeId,
-  ])
+  // Only re-subscribe when the stable callbacks change (practically never since they depend only on [API]).
+  }, [loadDocuments, loadRules, loadDecisions, loadRuleManifest])
+
+  useEffect(() => {
+    if (!selectedRuleId) {
+      setRuleManifest(null)
+      return
+    }
+    void loadRuleManifest(selectedRuleId)
+  }, [selectedRuleId, loadRuleManifest])
 
   useEffect(() => {
     if (!trackedUploadDocId) return
@@ -614,18 +777,10 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-xs font-bold uppercase tracking-[0.25em] text-slate-400">Eligibility Studio</p>
-              <h2 className="mt-1 text-2xl font-black text-slate-900">PDF to Metadata to Inclusion/Exclusion</h2>
+              <h2 className="mt-1 text-2xl font-black text-slate-900">Policy Document to Eligibility Decision Engine</h2>
               <p className="mt-2 text-sm text-slate-600">
                 Select a policy document, extract eligibility metadata for a scheme, and evaluate citizens from dump data.
               </p>
-            </div>
-            <div className="flex gap-2">
-              <Button variant="outline" className="rounded-xl" onClick={() => { void loadDocuments() }} disabled={loadingDocs}>
-                {loadingDocs ? "Refreshing..." : "Refresh Documents"}
-              </Button>
-              <Button variant="outline" className="rounded-xl" onClick={() => loadRules(schemeId.trim())} disabled={loadingRules}>
-                {loadingRules ? "Loading..." : "Refresh Rules"}
-              </Button>
             </div>
           </div>
         </Card>
@@ -696,6 +851,14 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                     </option>
                   ))}
                 </select>
+                <Button
+                  variant="outline"
+                  className="mt-3 rounded-xl border-rose-200 text-rose-700 hover:bg-rose-50"
+                  onClick={handleDeleteSelectedDocument}
+                  disabled={!selectedDocumentId}
+                >
+                  Delete Selected Document
+                </Button>
               </div>
 
               <div>
@@ -846,7 +1009,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                   className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 outline-none"
                 >
                   <option value="">Select rule</option>
-                  {rules.map((rule) => (
+                  {latestRulesByScheme.map((rule) => (
                     <option key={rule.id} value={rule.id}>
                       {rule.rule_name} | {rule.scheme_id} | v{rule.rule_version}
                     </option>
@@ -878,6 +1041,14 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                 disabled={(!selectedRuleId && !showAllDecisions) || loadingDecisions}
               >
                 {loadingDecisions ? "Loading decisions..." : "Refresh Decisions"}
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full rounded-xl"
+                onClick={() => loadRuleManifest(selectedRuleId)}
+                disabled={!selectedRuleId || loadingManifest}
+              >
+                {loadingManifest ? "Loading manifest..." : "Refresh Rule Manifest"}
               </Button>
               <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
                 <input
@@ -945,6 +1116,48 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
 
         <Card className="rounded-3xl border-slate-200 bg-white p-6">
           <div className="flex items-center justify-between">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Rule Manifest Mapping</p>
+            <p className="text-xs font-semibold text-slate-500">{ruleManifest?.field_mapping?.length || 0} fields</p>
+          </div>
+          {!ruleManifest ? (
+            <p className="mt-3 text-sm text-slate-500">Select a rule to see mapped fields, missing fields, and manual input requirements.</p>
+          ) : (
+            <div className="mt-4 space-y-3">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                <p><span className="font-semibold">Scheme:</span> {ruleManifest.scheme_id}</p>
+                <p><span className="font-semibold">Rule:</span> {ruleManifest.rule_name} (v{ruleManifest.rule_version})</p>
+                <p><span className="font-semibold">Manual fields:</span> {(ruleManifest.manual_input_requirements || []).map((item) => item.field).join(", ") || "None"}</p>
+              </div>
+              <div className="overflow-auto">
+                <table className="w-full min-w-[780px] text-left">
+                  <thead>
+                    <tr className="border-b border-slate-100">
+                      <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Schema Field</th>
+                      <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">DB Column</th>
+                      <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Status</th>
+                      <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Type</th>
+                      <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Note</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(ruleManifest.field_mapping || []).map((row) => (
+                      <tr key={row.schemaField} className="border-b border-slate-50">
+                        <td className="py-2 pr-3 text-sm font-medium text-slate-800">{row.schemaField}</td>
+                        <td className="py-2 pr-3 text-sm text-slate-700">{row.db_column || "-"}</td>
+                        <td className="py-2 pr-3 text-sm text-slate-700">{row.db_status}</td>
+                        <td className="py-2 pr-3 text-sm text-slate-700">{row.value_type || "-"}</td>
+                        <td className="py-2 pr-3 text-xs text-slate-600">{row.note || "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </Card>
+
+        <Card className="rounded-3xl border-slate-200 bg-white p-6">
+          <div className="flex items-center justify-between">
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Decisions</p>
             <p className="text-xs font-semibold text-slate-500">{decisions.length} rows</p>
           </div>
@@ -988,9 +1201,14 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                           setEditingDecisionId(row.id)
                           if (!manualInputDrafts[row.id]) {
                             const existing = row.evidence_json?.manual_inputs || {}
+                            const dbValues = row.evidence_json?.source_values || {}
                             const initial: Record<string, string> = {}
                             for (const req of (row.manual_input_requirements || [])) {
-                              initial[req.field] = String((existing as any)?.[req.field] ?? "")
+                              const existingVal = (existing as any)?.[req.field]
+                              const dbVal = getDBValueForField(dbValues, req.field)
+                              initial[req.field] = existingVal !== undefined && existingVal !== null && existingVal !== ""
+                                ? String(existingVal)
+                                : (dbVal !== undefined && dbVal !== null ? String(dbVal) : "")
                             }
                             setManualInputDrafts((prev) => ({ ...prev, [row.id]: initial }))
                           }
@@ -1013,45 +1231,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
           </div>
         </Card>
 
-        <Card className="rounded-3xl border-slate-200 bg-white p-6">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Document Processing Status</p>
-            <p className="text-xs font-semibold text-slate-500">{documents.length} documents</p>
-          </div>
-          <div className="mt-4 overflow-auto">
-            <table className="w-full min-w-[780px] text-left">
-              <thead>
-                <tr className="border-b border-slate-100">
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Filename</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Status</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Stage</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Progress</th>
-                </tr>
-              </thead>
-              <tbody>
-                {documents.slice(0, 20).map((doc) => (
-                  <tr key={doc.id} className="border-b border-slate-50">
-                    <td className="py-2 pr-3 text-sm font-medium text-slate-800">{doc.filename}</td>
-                    <td className="py-2 pr-3 text-sm">
-                      <Badge className={doc.status === "success" ? "bg-emerald-100 text-emerald-700" : doc.status === "failed" ? "bg-rose-100 text-rose-700" : "bg-slate-100 text-slate-700"}>
-                        {doc.status}
-                      </Badge>
-                    </td>
-                    <td className="py-2 pr-3 text-sm text-slate-600">{doc.sub_status || "-"}</td>
-                    <td className="py-2 pr-3 text-sm text-slate-600">{doc.progress_percent ?? 0}%</td>
-                  </tr>
-                ))}
-                {documents.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="py-8 text-center text-sm font-medium text-slate-500">
-                      No documents found.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Card>
         <Dialog open={!!activeEditingRow} onOpenChange={(open) => { if (!open) setEditingDecisionId(null) }}>
           <DialogContent className="max-h-[90vh] max-w-3xl overflow-hidden rounded-2xl p-0">
             <div className="flex max-h-[90vh] flex-col">

@@ -150,12 +150,24 @@ async def get_district_heatmap():
 
 
 @router.get("/top-risk")
-async def get_top_risk_citizens(limit: int = 20, tier: str = None):
-    """Returns the most vulnerable citizens, optionally filtered by tier."""
+async def get_top_risk_citizens(limit: int = 20, tier: str = None, segment: str = None):
+    """Returns the most vulnerable citizens, optionally filtered by tier or cohort segment."""
     tier_filter = f"AND c.risk_tier = '{tier.upper()}'" if tier else ""
+    
+    segment_filter = ""
+    if segment == 'elderly':
+        segment_filter = "AND toInteger(split(c.dob, '-')[0]) <= date().year - 60"
+    elif segment == 'children':
+        segment_filter = "AND toInteger(split(c.dob, '-')[0]) >= date().year - 18"
+    elif segment == 'workers':
+        segment_filter = "AND toInteger(split(c.dob, '-')[0]) > date().year - 60 AND toInteger(split(c.dob, '-')[0]) < date().year - 18"
+        
     data = await run_neo4j_query(f"""
         MATCH (c:Citizen)
-        WHERE c.vulnerability_score IS NOT NULL {tier_filter}
+        WHERE c.vulnerability_score IS NOT NULL {tier_filter} {segment_filter}
+        WITH c
+        ORDER BY c.vulnerability_score DESC
+        LIMIT {limit}
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         OPTIONAL MATCH (c)-[:ENROLLED_IN]->(s:Scheme)
         RETURN
@@ -165,12 +177,11 @@ async def get_top_risk_citizens(limit: int = 20, tier: str = None):
             c.uid                  AS uid,
             c.vulnerability_score  AS score,
             c.risk_tier            AS tier,
-            d.name                 AS district,
-            b.name                 AS block,
-            g.name                 AS gp,
-            collect(s.name)        AS schemes
-        ORDER BY c.vulnerability_score DESC
-        LIMIT {limit}
+            head(collect(distinct d.name)) AS district,
+            head(collect(distinct b.name)) AS block,
+            head(collect(distinct g.name)) AS gp,
+            collect(distinct s.name)        AS schemes
+        ORDER BY score DESC
     """)
     return {"citizens": data}
 

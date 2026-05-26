@@ -114,10 +114,15 @@ interface UsrRulesEF {
 
 
 
-export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactNode }> = ({ API, navArea }) => {
+export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
   const INTEL_PAGE_SIZE = 500
   const [usrStats, setUsrStats] = useState<UsrStats | null>(null)
-  const [usrTopRisk, setUsrTopRisk] = useState<UsrCitizen[]>([])
+  const [usrTopRisk, setUsrTopRisk] = useState<Record<string, UsrCitizen[]>>({
+    all: [],
+    elderly: [],
+    children: [],
+    workers: []
+  })
   const [usrHeatmap, setUsrHeatmap] = useState<UsrDistrict[]>([])
   const [usrLoading, setUsrLoading] = useState(false)
   const [usrGhosts, setUsrGhosts] = useState<UsrFraudFlag[]>([])
@@ -177,14 +182,22 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
     setUsrLoading(true)
 
     try {
-      const [statsRes, topRiskRes, heatmapRes] = await Promise.all([
+      const [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes] = await Promise.all([
         axios.get(`${API}/api/usr/stats`),
         axios.get(`${API}/api/usr/top-risk?limit=50`),
+        axios.get(`${API}/api/usr/top-risk?limit=50&segment=elderly`),
+        axios.get(`${API}/api/usr/top-risk?limit=50&segment=children`),
+        axios.get(`${API}/api/usr/top-risk?limit=50&segment=workers`),
         axios.get(`${API}/api/usr/heatmap`),
       ])
 
       setUsrStats(statsRes.data)
-      setUsrTopRisk(topRiskRes.data.citizens || [])
+      setUsrTopRisk({
+        all: topRiskAll.data.citizens || [],
+        elderly: topRiskElderly.data.citizens || [],
+        children: topRiskChildren.data.citizens || [],
+        workers: topRiskWorkers.data.citizens || []
+      })
       setUsrHeatmap(heatmapRes.data.districts || [])
       usrHasLoadedRef.current = true
     } catch (err) {
@@ -326,22 +339,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
     } catch { return 0 }
   }
 
-  const filteredCitizens = usrTopRisk.filter(c => {
-    if (segmentFilter === 'all') return true
-    const age = calculateAge(c.dob)
-    if (segmentFilter === 'elderly') return age >= 60
-    if (segmentFilter === 'children') return age <= 18
-    if (segmentFilter === 'disabled') {
-      // Disabled: flagged by scheme name OR mid-age with high score (proxy for disability benefit)
-      const hasDisabilityScheme = (c.schemes || []).some(s =>
-        /disab|handicap|viklang|divyang/i.test(s)
-      )
-      const isMidAge = age > 18 && age < 60
-      const isHighRisk = c.score >= 41
-      return hasDisabilityScheme || (isMidAge && isHighRisk)
-    }
-    return true
-  })
+  const filteredCitizens = usrTopRisk[segmentFilter] || []
 
   const visibleCitizens = showAllCitizens ? filteredCitizens : filteredCitizens.slice(0, 10)
   const intelligenceFeedCount = usrIntelligenceFeed.length + usrRulesEF.rule_e.length + usrRulesEF.rule_f.length
@@ -542,8 +540,6 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
             {/* --- Unified Command Header --- */}
             <header className="flex items-center justify-between p-6 md:p-8 bg-white border-b border-slate-100 sticky top-0 z-30 shadow-sm shadow-slate-900/5">
               <div className="flex items-center gap-6">
-                {navArea}
-                <div className="h-8 w-px bg-slate-200" />
                 <h1 className="text-3xl font-black tracking-tight text-slate-900 m-0">
                   Social Registry Intelligence Hub
                 </h1>
@@ -705,14 +701,14 @@ export const UsrDashboard: React.FC<UsrDashboardProps & { navArea?: React.ReactN
                      <p className="text-xs text-slate-500 font-medium mt-1 mb-6">Categorizing beneficiaries based on their current stage for scheme optimization.</p>
                      
                      <div className="flex gap-2 mb-6">
-                       {['all', 'elderly', 'children', 'disabled'].map((seg) => (
+                       {['all', 'elderly', 'children', 'workers'].map((seg) => (
                          <Button 
                            key={seg}
                            onClick={() => setSegmentFilter(seg)}
                            variant={segmentFilter === seg ? 'default' : 'outline'}
                            className={`h-8 px-4 text-[10px] font-bold uppercase tracking-widest rounded-lg ${segmentFilter === seg ? 'bg-slate-900' : 'border-slate-100 bg-slate-50'}`}
                          >
-                           {seg}
+                           {seg === 'workers' ? 'working age' : seg}
                          </Button>
                        ))}
                      </div>

@@ -160,6 +160,16 @@ async def search_chunks(
         for hit in hits
     ]
 
+
+async def delete_document_chunks(document_id: str) -> None:
+    """Delete all indexed chunks for a specific document from Qdrant."""
+    client = get_qdrant_client()
+    await client.delete(
+        collection_name=settings.QDRANT_COLLECTION,
+        points_selector=Filter(
+            must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+        ),
+    )
     logger.info(f"Deleted all chunks for document_id={document_id}")
 
 

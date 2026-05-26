@@ -527,6 +527,8 @@ async def get_usr_citizen_fraud_snapshot(name: str, limit: int = 5) -> List[Dict
         query = """
         MATCH (c:Citizen)
         WHERE toLower(coalesce(c.name, "")) CONTAINS toLower($name)
+        WITH c
+        LIMIT $limit
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         OPTIONAL MATCH (c)-[rel:FLAGGED_AS]->(f:FraudFlag)
         WITH c, g, b, d, rel, f
@@ -538,9 +540,9 @@ async def get_usr_citizen_fraud_snapshot(name: str, limit: int = 5) -> List[Dict
           c.gender AS gender,
           c.vulnerability_score AS vulnerability_score,
           c.risk_tier AS risk_tier,
-          d.name AS district,
-          b.name AS block,
-          g.name AS gp,
+          head(collect(distinct d.name)) AS district,
+          head(collect(distinct b.name)) AS block,
+          head(collect(distinct g.name)) AS gp,
           collect(DISTINCT CASE
             WHEN f IS NULL THEN NULL
             ELSE {
@@ -550,7 +552,6 @@ async def get_usr_citizen_fraud_snapshot(name: str, limit: int = 5) -> List[Dict
               confidence: rel.confidence
             }
           END) AS flags
-        LIMIT $limit
         """
         result = await session.run(query, name=name.strip(), limit=limit)
         records = await result.data()
@@ -584,14 +585,15 @@ async def get_usr_citizen_name_suggestions(name: str, limit: int = 8) -> List[Di
         query = f"""
         MATCH (c:Citizen)
         WHERE {token_clauses}
+        WITH c
+        LIMIT $limit
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         RETURN
           c.uid AS uid,
           c.name AS name,
-          d.name AS district,
-          b.name AS block,
-          g.name AS gp
-        LIMIT $limit
+          head(collect(distinct d.name)) AS district,
+          head(collect(distinct b.name)) AS block,
+          head(collect(distinct g.name)) AS gp
         """
         result = await session.run(query, **params)
         return await result.data()
@@ -611,25 +613,6 @@ async def get_usr_citizen_fraud_snapshot_by_uid(uid: str) -> Dict[str, Any] | No
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         OPTIONAL MATCH (c)-[rel:FLAGGED_AS]->(f:FraudFlag)
         OPTIONAL MATCH (c)-[dup:POTENTIAL_DUPLICATE]-(other:Citizen)
-        WITH c, g, b, d,
-             collect(DISTINCT CASE
-               WHEN f IS NULL THEN NULL
-               ELSE {
-                 rule: f.rule,
-                 type: f.type,
-                 description: f.description,
-                 confidence: rel.confidence
-               }
-             END) AS flags,
-             collect(DISTINCT CASE
-               WHEN other IS NULL THEN NULL
-               ELSE {
-                 uid: other.uid,
-                 name: other.name,
-                 confidence: dup.confidence,
-                 rule: dup.rule
-               }
-             END) AS duplicate_links
         RETURN
           c.uid AS uid,
           c.name AS name,
@@ -637,11 +620,27 @@ async def get_usr_citizen_fraud_snapshot_by_uid(uid: str) -> Dict[str, Any] | No
           c.gender AS gender,
           c.vulnerability_score AS vulnerability_score,
           c.risk_tier AS risk_tier,
-          d.name AS district,
-          b.name AS block,
-          g.name AS gp,
-          flags,
-          duplicate_links
+          head(collect(distinct d.name)) AS district,
+          head(collect(distinct b.name)) AS block,
+          head(collect(distinct g.name)) AS gp,
+          collect(DISTINCT CASE
+            WHEN f IS NULL THEN NULL
+            ELSE {
+              rule: f.rule,
+              type: f.type,
+              description: f.description,
+              confidence: rel.confidence
+            }
+          END) AS flags,
+          collect(DISTINCT CASE
+            WHEN other IS NULL THEN NULL
+            ELSE {
+              uid: other.uid,
+              name: other.name,
+              confidence: dup.confidence,
+              rule: dup.rule
+            }
+          END) AS duplicate_links
         LIMIT 1
         """
         result = await session.run(query, uid=uid.strip())
@@ -701,17 +700,18 @@ async def get_usr_citizens_by_scheme(scheme_id: str, limit: int = 50) -> List[Di
     async with driver.session() as session:
         query = """
         MATCH (c:Citizen)-[:ENROLLED_IN]->(s:Scheme {id: $scheme_id})
+        WITH c, s
+        LIMIT $limit
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         RETURN
           c.uid AS uid,
           c.name AS name,
           c.dob AS dob,
           c.gender AS gender,
-          d.name AS district,
-          b.name AS block,
-          g.name AS gp,
+          head(collect(distinct d.name)) AS district,
+          head(collect(distinct b.name)) AS block,
+          head(collect(distinct g.name)) AS gp,
           s.name AS scheme_name
-        LIMIT $limit
         """
         result = await session.run(query, scheme_id=scheme_id.strip(), limit=limit)
         return await result.data()
