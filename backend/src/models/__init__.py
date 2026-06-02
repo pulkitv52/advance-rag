@@ -7,6 +7,7 @@ from src.models.eligibility import (
     EligibilitySchemaSignal,
 )
 from src.models.project import Project, ProjectDocument
+from src.models.review import DecisionReview
 from src.models.report import Report
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "EligibilitySchemaSignal",
     "Project",
     "ProjectDocument",
+    "DecisionReview",
     "Analysis",
     "Report",
 ]

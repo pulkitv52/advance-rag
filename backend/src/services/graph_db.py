@@ -531,7 +531,8 @@ async def get_usr_citizen_fraud_snapshot(name: str, limit: int = 5) -> List[Dict
         LIMIT $limit
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         OPTIONAL MATCH (c)-[rel:FLAGGED_AS]->(f:FraudFlag)
-        WITH c, g, b, d, rel, f
+        OPTIONAL MATCH (c)-[:ENROLLED_IN]->(s:Scheme)
+        WITH c, g, b, d, rel, f, s
         ORDER BY coalesce(rel.confidence, 0) DESC
         RETURN
           c.uid AS uid,
@@ -551,14 +552,22 @@ async def get_usr_citizen_fraud_snapshot(name: str, limit: int = 5) -> List[Dict
               description: f.description,
               confidence: rel.confidence
             }
-          END) AS flags
+          END) AS flags,
+          collect(DISTINCT CASE
+            WHEN s IS NULL THEN NULL
+            ELSE {
+              id: s.id,
+              name: coalesce(s.name, s.id)
+            }
+          END) AS schemes
         """
         result = await session.run(query, name=name.strip(), limit=limit)
         records = await result.data()
 
-        # Strip null placeholders from collected flags.
+        # Strip null placeholders from collected flags and schemes.
         for row in records:
             row["flags"] = [f for f in row.get("flags", []) if f]
+            row["schemes"] = [s for s in row.get("schemes", []) if s]
         return records
 
 
@@ -613,6 +622,7 @@ async def get_usr_citizen_fraud_snapshot_by_uid(uid: str) -> Dict[str, Any] | No
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
         OPTIONAL MATCH (c)-[rel:FLAGGED_AS]->(f:FraudFlag)
         OPTIONAL MATCH (c)-[dup:POTENTIAL_DUPLICATE]-(other:Citizen)
+        OPTIONAL MATCH (c)-[:ENROLLED_IN]->(s:Scheme)
         RETURN
           c.uid AS uid,
           c.name AS name,
@@ -640,7 +650,14 @@ async def get_usr_citizen_fraud_snapshot_by_uid(uid: str) -> Dict[str, Any] | No
               confidence: dup.confidence,
               rule: dup.rule
             }
-          END) AS duplicate_links
+          END) AS duplicate_links,
+          collect(DISTINCT CASE
+            WHEN s IS NULL THEN NULL
+            ELSE {
+              id: s.id,
+              name: coalesce(s.name, s.id)
+            }
+          END) AS schemes
         LIMIT 1
         """
         result = await session.run(query, uid=uid.strip())
@@ -651,6 +668,7 @@ async def get_usr_citizen_fraud_snapshot_by_uid(uid: str) -> Dict[str, Any] | No
         data = dict(row)
         data["flags"] = [f for f in data.get("flags", []) if f]
         data["duplicate_links"] = [x for x in data.get("duplicate_links", []) if x]
+        data["schemes"] = [s for s in data.get("schemes", []) if s]
         return data
 
 
@@ -715,3 +733,19 @@ async def get_usr_citizens_by_scheme(scheme_id: str, limit: int = 50) -> List[Di
         """
         result = await session.run(query, scheme_id=scheme_id.strip(), limit=limit)
         return await result.data()
+
+
+async def execute_read_only_cypher(cypher_query: str) -> List[Dict[str, Any]]:
+    """
+    Executes a validated read-only Cypher query and returns the results.
+    """
+    driver = await get_driver()
+    async with driver.session() as session:
+        try:
+            logger.info(f"[NEO4J] Executing read-only Cypher query:\n{cypher_query}")
+            result = await session.run(cypher_query)
+            return await result.data()
+        except Exception as e:
+            logger.error(f"[NEO4J] Failed to execute Cypher: {e}")
+            raise e
+

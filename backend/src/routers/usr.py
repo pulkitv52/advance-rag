@@ -9,12 +9,22 @@ Fraud detection uses a confidence-weighted 4-rule-set system:
   Rule Set D: Data Quality Audit
 """
 
+import hashlib
 import io
+from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
-from fpdf import FPDF
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from sqlmodel import desc, select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from src.core.database import get_session
 from src.core.logger import logger
+from src.models.review import DecisionReview
 from src.services import ai_analytics, graph_sync
 from src.services.graph_db import get_driver
 
@@ -242,39 +252,49 @@ async def get_ghost_beneficiaries():
 
 
 @router.get("/intelligence/feed")
-async def get_intelligence_feed(limit: int = 100, offset: int = 0):
+async def get_intelligence_feed(
+    limit: int = 100,
+    offset: int = 0,
+    include_total: bool = True,
+    session: AsyncSession = Depends(get_session),
+):
     """
     Unified feed of all Intelligence Flags from the Knowledge Graph.
     Consolidates Ghosts, Duplicates, and Anomalies into a single stream.
     """
-    safe_limit = max(1, min(limit, 5000))
+    # Keep page sizes conservative to avoid large in-memory UNION+ORDER BY workloads.
+    safe_limit = max(1, min(limit, 50))
     safe_offset = max(0, offset)
 
-    total_rows = await run_neo4j_query("""
-        CALL {
-            MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
-            RETURN 1 AS row_count
-            UNION ALL
-            MATCH (:Operator)-[rel:FLAGGED_AS]->(:FraudFlag)
-            RETURN 1 AS row_count
-            UNION ALL
-            MATCH (:RationCard)-[rel:FLAGGED_AS]->(:FraudFlag)
-            RETURN 1 AS row_count
-            UNION ALL
-            MATCH (:Citizen)-[:POTENTIAL_DUPLICATE]->(:Citizen)
-            RETURN 1 AS row_count
-            UNION ALL
-            MATCH (:Citizen)-[:SAME_DOB_AT_GP]->(:Citizen)
-            RETURN 1 AS row_count
-        }
-        RETURN count(row_count) AS total
-    """)
-    total = int(total_rows[0].get("total", 0)) if total_rows else 0
+    total: int | None = None
+    if include_total:
+        total_rows = await run_neo4j_query("""
+            CALL {
+                MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
+                RETURN 1 AS row_count
+                UNION ALL
+                MATCH (:Operator)-[rel:FLAGGED_AS]->(:FraudFlag)
+                RETURN 1 AS row_count
+                UNION ALL
+                MATCH (:RationCard)-[rel:FLAGGED_AS]->(:FraudFlag)
+                RETURN 1 AS row_count
+                UNION ALL
+                MATCH (:Citizen)-[:POTENTIAL_DUPLICATE]->(:Citizen)
+                RETURN 1 AS row_count
+                UNION ALL
+                MATCH (:Citizen)-[:SAME_DOB_AT_GP]->(:Citizen)
+                RETURN 1 AS row_count
+            }
+            RETURN count(row_count) AS total
+        """)
+        total = int(total_rows[0].get("total", 0)) if total_rows else 0
 
     data = await run_neo4j_query(
         """
         CALL {
             MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
+            OPTIONAL MATCH (c)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
+            WITH c, rel, f, head(collect(DISTINCT d.name)) AS district_name
             RETURN
                 f.rule AS rule,
                 coalesce(f.label, f.rule) AS label,
@@ -284,6 +304,7 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
                 c.uid AS uid,
                 coalesce(c.dob, 'Unknown') AS dob,
                 coalesce(c.gp_name, 'Unknown') AS gp_name,
+                coalesce(district_name, 'Unknown') AS district,
                 coalesce(rel.confidence, 0) AS confidence,
                 toString(rel.detected_at) AS detected_at
             UNION ALL
@@ -297,6 +318,7 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
                 coalesce(o.id, '') AS uid,
                 'Unknown' AS dob,
                 'N/A' AS gp_name,
+                'N/A' AS district,
                 coalesce(rel.confidence, 0) AS confidence,
                 toString(rel.detected_at) AS detected_at
             UNION ALL
@@ -310,10 +332,13 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
                 coalesce(rc.number, '') AS uid,
                 'Unknown' AS dob,
                 'N/A' AS gp_name,
+                'N/A' AS district,
                 coalesce(rel.confidence, 0) AS confidence,
                 toString(rel.detected_at) AS detected_at
             UNION ALL
             MATCH (c1:Citizen)-[rel:POTENTIAL_DUPLICATE]->(c2:Citizen)
+            OPTIONAL MATCH (c1)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
+            WITH c1, c2, rel, head(collect(DISTINCT d.name)) AS district_name
             RETURN
                 coalesce(rel.rule, 'B1') AS rule,
                 coalesce(rel.rule, 'B1') AS label,
@@ -323,10 +348,13 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
                 c1.uid AS uid,
                 coalesce(c1.dob, 'Unknown') AS dob,
                 coalesce(c1.gp_name, 'Unknown') AS gp_name,
+                coalesce(district_name, 'Unknown') AS district,
                 coalesce(rel.confidence, 85) AS confidence,
                 toString(rel.detected_at) AS detected_at
             UNION ALL
             MATCH (c1:Citizen)-[rel:SAME_DOB_AT_GP]->(c2:Citizen)
+            OPTIONAL MATCH (c1)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
+            WITH c1, c2, rel, head(collect(DISTINCT d.name)) AS district_name
             RETURN
                 coalesce(rel.rule, 'B3') AS rule,
                 coalesce(rel.rule, 'B3') AS label,
@@ -336,11 +364,12 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
                 c1.uid AS uid,
                 coalesce(c1.dob, 'Unknown') AS dob,
                 coalesce(c1.gp_name, 'Unknown') AS gp_name,
+                coalesce(district_name, 'Unknown') AS district,
                 coalesce(rel.confidence, 80) AS confidence,
                 toString(rel.detected_at) AS detected_at
         }
         RETURN
-            rule, label, type, description, name, uid, dob, gp_name, confidence, detected_at
+            rule, label, type, description, name, uid, dob, gp_name, district, confidence, detected_at
         ORDER BY confidence DESC, detected_at DESC
         SKIP $offset
         LIMIT $limit
@@ -348,7 +377,47 @@ async def get_intelligence_feed(limit: int = 100, offset: int = 0):
         params={"limit": safe_limit, "offset": safe_offset},
     )
 
-    return {"total": total, "limit": safe_limit, "offset": safe_offset, "feed": data}
+    feed = []
+    for row in data:
+        key = "|".join(
+            [
+                str(row.get("rule") or ""),
+                str(row.get("uid") or ""),
+                str(row.get("name") or ""),
+                str(row.get("detected_at") or ""),
+                str(row.get("description") or ""),
+            ]
+        )
+        row_id = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+        feed.append({**row, "id": row_id})
+
+    row_ids = [item["id"] for item in feed]
+    latest_review_by_id = {}
+    if row_ids:
+        review_rows = (
+            await session.exec(
+                select(DecisionReview)
+                .where(DecisionReview.decision_id.in_(row_ids))
+                .order_by(desc(DecisionReview.reviewed_at))
+            )
+        ).all()
+        for review in review_rows:
+            if review.decision_id not in latest_review_by_id:
+                latest_review_by_id[review.decision_id] = {
+                    "action": review.action,
+                    "note": review.note,
+                    "reviewed_by": review.reviewed_by,
+                    "reviewed_at": review.reviewed_at,
+                }
+
+    enriched = [
+        {
+            **item,
+            "latest_review": latest_review_by_id.get(item["id"]),
+        }
+        for item in feed
+    ]
+    return {"total": total, "limit": safe_limit, "offset": safe_offset, "feed": enriched}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -416,121 +485,393 @@ async def get_fraud_summary():
 
 
 @router.get("/audit-queue")
-async def get_field_audit_queue(limit: int = 50):
+async def get_field_audit_queue(
+    limit: int = 50,
+    rules: str | None = Query(default=None, description="Comma-separated rule codes, e.g. A1,B1,F1"),
+    district: str | None = Query(default=None, description="District name exact match"),
+    mauza: str | None = Query(default=None, description="Mauza/Block name exact match"),
+):
     """
     Returns the top N citizens requiring urgent field verification.
     Selection criteria: Critical Risk Tier (Score > 60) AND multiple fraud flags.
     """
-    data = await run_neo4j_query(f"""
+    selected_rules: list[str] = []
+    if rules:
+        raw_rules = [r.strip().upper() for r in rules.split(",") if r.strip()]
+        selected_rules = [r for r in raw_rules if all(ch.isalnum() or ch == "_" for ch in r)]
+
+    district_filter = (district or "").strip()
+    mauza_filter = (mauza or "").strip()
+
+    total_rows = await run_neo4j_query(
+        """
+        MATCH (c:Citizen)-[:FLAGGED_AS]->(fl:FraudFlag)
+        WHERE ($rules_count = 0 OR toUpper(coalesce(fl.rule, '')) IN $rules)
+        OPTIONAL MATCH (c)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
+        WITH c, b, d
+        WHERE ($district = '' OR coalesce(d.name, '') = $district)
+          AND ($mauza = '' OR coalesce(b.name, '') = $mauza)
+        RETURN count(DISTINCT c) AS total
+        """,
+        {
+            "rules": selected_rules,
+            "rules_count": len(selected_rules),
+            "district": district_filter,
+            "mauza": mauza_filter,
+        },
+    )
+    total = int(total_rows[0].get("total", 0)) if total_rows else 0
+
+    data = await run_neo4j_query("""
         MATCH (c:Citizen)-[f:FLAGGED_AS]->(fl:FraudFlag)
+        WHERE ($rules_count = 0 OR toUpper(coalesce(fl.rule, '')) IN $rules)
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
-        WITH c, g, b, d, count(f) as flags, collect(fl.description) as flag_notes
+        WITH c, g, b, d, f, fl
+        WHERE ($district = '' OR coalesce(d.name, '') = $district)
+          AND ($mauza = '' OR coalesce(b.name, '') = $mauza)
+        WITH
+            c,
+            head(collect(DISTINCT g.name)) AS gp_name,
+            head(collect(DISTINCT b.name)) AS block_name,
+            head(collect(DISTINCT d.name)) AS district_name,
+            count(DISTINCT f) as flags,
+            collect(DISTINCT fl.description) as flag_notes,
+            collect(DISTINCT toUpper(coalesce(fl.rule, 'UNKNOWN'))) as rule_codes
         RETURN
             c.name          AS name,
             c.uid           AS uid,
             c.dob           AS dob,
             c.gender        AS gender,
             c.vulnerability_score AS score,
-            d.name          AS district,
-            b.name          AS block,
-            g.name          AS gp,
+            district_name   AS district,
+            block_name      AS block,
+            gp_name         AS gp,
             flags,
+            rule_codes,
             flag_notes
         ORDER BY flags DESC, c.vulnerability_score DESC
-        LIMIT {limit}
+        LIMIT $limit
+    """, {
+        "limit": int(limit),
+        "rules": selected_rules,
+        "rules_count": len(selected_rules),
+        "district": district_filter,
+        "mauza": mauza_filter,
+    })
+    return {"queue": data, "total": total, "limit": int(limit)}
+
+
+@router.get("/intelligence/filters")
+async def get_intelligence_filters():
+    """Returns dynamic filter values for district, mauza(block), and rule."""
+    district_rows = await run_neo4j_query("""
+        MATCH (:Citizen)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
+        WHERE d.name IS NOT NULL
+        RETURN DISTINCT d.name AS value
+        ORDER BY value
     """)
-    return {"queue": data}
+    mauza_rows = await run_neo4j_query("""
+        MATCH (:Citizen)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(b:Block)
+        WHERE b.name IS NOT NULL
+        RETURN DISTINCT b.name AS value
+        ORDER BY value
+    """)
+    rule_rows = await run_neo4j_query("""
+        MATCH (:Citizen)-[:FLAGGED_AS]->(f:FraudFlag)
+        WHERE f.rule IS NOT NULL
+        RETURN DISTINCT toUpper(f.rule) AS value
+        ORDER BY value
+    """)
+    district_mauza_rows = await run_neo4j_query("""
+        MATCH (:Citizen)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
+        WHERE d.name IS NOT NULL AND b.name IS NOT NULL
+        RETURN DISTINCT d.name AS district, b.name AS mauza
+        ORDER BY district, mauza
+    """)
+
+    districts = [str(r.get("value", "")).strip() for r in district_rows if str(r.get("value", "")).strip()]
+    mauzas = [str(r.get("value", "")).strip() for r in mauza_rows if str(r.get("value", "")).strip()]
+    rules = [str(r.get("value", "")).strip() for r in rule_rows if str(r.get("value", "")).strip()]
+
+    return {
+        "districts": districts,
+        "mauzas": mauzas,
+        "rules": rules,
+        "district_mauza_pairs": [
+            {
+                "district": str(r.get("district", "")).strip(),
+                "mauza": str(r.get("mauza", "")).strip(),
+            }
+            for r in district_mauza_rows
+            if str(r.get("district", "")).strip() and str(r.get("mauza", "")).strip()
+        ],
+    }
+
+@router.get("/audit-rules")
+async def get_audit_rules():
+    """Returns canonical + detected fraud rule codes for export filtering."""
+    canonical_rules = [
+        "A1", "A2",
+        "B1", "B2", "B3",
+        "C1", "C2",
+        "D1",
+        "E1",
+        "F1",
+        "G1",
+        "H1",
+        "I1",
+    ]
+    rows = await run_neo4j_query("""
+        MATCH (:Citizen)-[:FLAGGED_AS]->(f:FraudFlag)
+        WHERE f.rule IS NOT NULL
+        RETURN DISTINCT toUpper(f.rule) AS rule
+        ORDER BY rule
+    """)
+    detected = [str(r.get("rule", "")).strip() for r in rows if str(r.get("rule", "")).strip()]
+    rules = sorted(set(canonical_rules + detected))
+    return {"rules": rules, "detected_rules": sorted(set(detected))}
 
 
 @router.get("/audit-queue/export-pdf")
-async def export_audit_queue_pdf():
+async def export_audit_queue_pdf(
+    rules: str | None = Query(default=None, description="Comma-separated rule codes, e.g. A1,B1,F1"),
+    district: str | None = Query(default=None, description="District name exact match"),
+    mauza: str | None = Query(default=None, description="Mauza/Block name exact match"),
+):
     """
     Generates a professional forensic audit brief in PDF format.
-    Includes the top 50 priority cases with signal justifications.
+    Includes all priority cases with signal justifications.
     """
     try:
-        # Fetch the same priority data
+        rule_names = {
+            "A1": "Ghost Beneficiary - Demographic anomaly",
+            "A2": "Ghost Beneficiary - Identity inconsistency",
+            "B1": "Duplicate Identity - High similarity profile",
+            "B2": "Duplicate Identity - Cross-record mismatch",
+            "B3": "Duplicate Identity - Same DOB cluster",
+            "C1": "Scheme Anomaly - GP concentration spike",
+            "C2": "Scheme Anomaly - Mutually exclusive scheme overlap",
+            "D1": "Data Quality - Null/invalid demographic field",
+            "D2": "Data Quality - Gender or schema anomaly",
+            "D3": "Data Quality - Future DOB anomaly",
+            "E1": "Household Ring - Synthetic household overload",
+            "F1": "Operator Anomaly - Suspicious registration concentration",
+            "G1": "Network Anomaly - Relationship graph outlier",
+            "H1": "Internal Integrity - System pattern deviation",
+            "I1": "Internal Integrity - High-risk correlation signal",
+        }
+        rule_plain_explanations = {
+            "A1": "Potential ghost beneficiary due to abnormal demographic pattern.",
+            "A2": "Potential ghost beneficiary due to identity mismatch across records.",
+            "B1": "Possible duplicate person with highly similar profile details.",
+            "B2": "Possible duplicate person with cross-record inconsistency.",
+            "B3": "Possible duplicate person sharing DOB cluster at same GP.",
+            "C1": "Scheme concentration appears unusually high in one local cluster.",
+            "C2": "Citizen appears in schemes that should not overlap together.",
+            "D1": "One or more mandatory demographic fields are null, blank, or invalid.",
+            "D2": "Gender value or demographic schema format is inconsistent/invalid.",
+            "D3": "Date of birth is in the future or chronologically invalid.",
+            "E1": "Household graph shows synthetic/overloaded linkage pattern.",
+            "F1": "Operator-linked registrations show suspicious concentration.",
+            "G1": "Relationship network structure appears as an outlier pattern.",
+            "H1": "Internal integrity signal indicates abnormal system behavior pattern.",
+            "I1": "High-risk pattern emerges from combined internal correlations.",
+        }
+        selected_rules: list[str] = []
+        if rules:
+            raw_rules = [r.strip().upper() for r in rules.split(",") if r.strip()]
+            selected_rules = [r for r in raw_rules if all(ch.isalnum() or ch == "_" for ch in r)]
+        district_filter = (district or "").strip()
+        mauza_filter = (mauza or "").strip()
+
+        # Fetch all priority data (optionally filtered by rule set)
         data = await run_neo4j_query("""
             MATCH (c:Citizen)-[f:FLAGGED_AS]->(fl:FraudFlag)
+            WHERE ($rules_count = 0 OR toUpper(coalesce(fl.rule, '')) IN $rules)
             OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
-            WITH c, g, b, d, count(f) as flags, collect(fl.label + ": " + fl.description) as flag_notes
+            WITH c, g, b, d, f, fl
+            WHERE ($district = '' OR coalesce(d.name, '') = $district)
+              AND ($mauza = '' OR coalesce(b.name, '') = $mauza)
+            WITH
+                c,
+                head(collect(DISTINCT g.name)) AS gp_name,
+                head(collect(DISTINCT b.name)) AS block_name,
+                head(collect(DISTINCT d.name)) AS district_name,
+                count(DISTINCT f) as flags,
+                collect(DISTINCT toUpper(coalesce(fl.rule, 'UNKNOWN'))) as rule_codes,
+                collect(DISTINCT fl.label + ": " + fl.description) as flag_notes
             RETURN 
                 c.name AS name, 
                 c.uid AS uid, 
-                g.name AS gp, 
-                b.name AS block, 
-                d.name AS district,
+                gp_name AS gp, 
+                block_name AS block, 
+                district_name AS district,
                 flags, 
+                rule_codes,
                 flag_notes
             ORDER BY flags DESC, c.vulnerability_score DESC
-            LIMIT 50
-        """)
+        """, {
+            "rules": selected_rules,
+            "rules_count": len(selected_rules),
+            "district": district_filter,
+            "mauza": mauza_filter,
+        })
 
-        # Generate PDF using fpdf2
-        pdf = FPDF()
-        pdf.add_page()
+        # Generate PDF using ReportLab
+        pdf_buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            pdf_buffer,
+            pagesize=landscape(A4),
+            leftMargin=14 * mm,
+            rightMargin=14 * mm,
+            topMargin=12 * mm,
+            bottomMargin=12 * mm,
+            title="Social Registry Forensic Audit Brief",
+            author="USR Audit Engine",
+        )
 
-        # Header
-        pdf.set_font("helvetica", "B", 20)
-        pdf.cell(0, 15, "Social Registry Forensic Audit Brief", ln=True, align="C")
-        pdf.set_font("helvetica", "B", 10)
-        pdf.cell(0, 10, "PRIORITY FIELD VERIFICATION LIST (TOP 50 CASES)", ln=True, align="C")
-        pdf.ln(5)
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "audit_title",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=18,
+            leading=22,
+            textColor=colors.HexColor("#0F172A"),
+            alignment=1,
+        )
+        subtitle_style = ParagraphStyle(
+            "audit_subtitle",
+            parent=styles["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=13,
+            textColor=colors.HexColor("#334155"),
+            alignment=1,
+        )
+        meta_style = ParagraphStyle(
+            "audit_meta",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=9,
+            leading=12,
+            textColor=colors.HexColor("#475569"),
+        )
+        cell_style = ParagraphStyle(
+            "audit_cell",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=7.5,
+            leading=9.5,
+            textColor=colors.HexColor("#0F172A"),
+        )
 
-        # Meta info
-        pdf.set_font("helvetica", "", 9)
-        pdf.cell(0, 5, f"Analysis Segment: 1.02M Social Registry Records", ln=True)
-        pdf.cell(0, 5, f"Date: 2026-04-20 | Intelligence Layer: Phase 4 Advanced", ln=True)
-        pdf.line(10, pdf.get_y() + 2, 200, pdf.get_y() + 2)
-        pdf.ln(10)
+        story = [
+            Paragraph("Social Registry Forensic Audit Brief", title_style),
+            Spacer(1, 3 * mm),
+            Paragraph("PRIORITY FIELD VERIFICATION LIST (ALL CASES)", subtitle_style),
+            Spacer(1, 4 * mm),
+            Paragraph("Analysis Segment: Social Registry Records", meta_style),
+            Paragraph(
+                f"Rule Filter: {', '.join(selected_rules) if selected_rules else 'ALL'}",
+                meta_style,
+            ),
+            Paragraph(
+                f"District Filter: {district_filter if district_filter else 'ALL'}",
+                meta_style,
+            ),
+            Paragraph(f"Exported Entries: {len(data)}", meta_style),
+            Paragraph(
+                f"Generated On: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC | Intelligence Layer: Phase 4 Advanced",
+                meta_style,
+            ),
+            Spacer(1, 5 * mm),
+        ]
 
-        # Table Column Widths
-        w = [40, 35, 45, 15, 55]  # Name, UID, GP/Block, Flags, Justification
+        legend_codes = selected_rules if selected_rules else sorted(rule_names.keys())
+        legend_lines = []
+        for code in legend_codes:
+            legend_lines.append(
+                f"<b>{code}</b>: {rule_names.get(code, 'Unclassified Rule')} - "
+                f"{rule_plain_explanations.get(code, 'Manual review required.')}"
+            )
+        story.append(Paragraph("<b>Rule Explanation Guide</b>", meta_style))
+        for line in legend_lines:
+            story.append(Paragraph(line, meta_style))
+        story.append(Spacer(1, 4 * mm))
 
-        # Table Headers
-        pdf.set_fill_color(240, 240, 240)
-        pdf.set_font("helvetica", "B", 8)
-        headers = ["CITIZEN NAME", "UID / ID", "REGION (GP/BLOCK)", "SIGS", "RISK JUSTIFICATION"]
-        for i in range(len(headers)):
-            pdf.cell(w[i], 8, headers[i], border=1, fill=True)
-        pdf.ln()
-
-        # Rows
-        pdf.set_font("helvetica", "", 7)
+        table_headers = ["CITIZEN NAME", "UID / ID", "DISTRICT", "REGION (GP/BLOCK)", "SIGS", "RULES", "RISK JUSTIFICATION"]
+        table_rows = [table_headers]
         for row in data:
-            # We use multi_cell or calculate height if notes are long
-            if start_y > 260:  # Page break logic
-                pdf.add_page()
-                pdf.set_font("helvetica", "B", 8)
-                for i in range(len(headers)):
-                    pdf.cell(w[i], 8, headers[i], border=1, fill=True)
-                pdf.ln()
-                pdf.set_font("helvetica", "", 7)
-                start_y = pdf.get_y()
+            name = str(row.get("name") or "Unknown")
+            uid = str(row.get("uid") or "N/A")
+            gp = str(row.get("gp") or "N/A")
+            block = str(row.get("block") or "N/A")
+            district = str(row.get("district") or "N/A")
+            region = f"{gp} / {block}"
+            sigs = str(row.get("flags") or 0)
+            raw_rules = [str(r).upper().strip() for r in (row.get("rule_codes") or []) if str(r).strip()]
+            pretty_rules = [f"{code} - {rule_names.get(code, 'Unclassified Rule')}" for code in raw_rules]
+            rules_text = "; ".join(pretty_rules) if pretty_rules else "UNKNOWN - Unclassified Rule"
+            notes = row.get("flag_notes") or []
+            first_code = raw_rules[0] if raw_rules else "UNKNOWN"
+            plain_reason = rule_plain_explanations.get(first_code, "General anomaly for field verification.")
+            note_text = f"Why flagged: {plain_reason}"
+            if notes:
+                note_text += " | Signal details: " + " | ".join(notes[:2])
 
-            # Render Row
-            name = str(row["name"])[:25]
-            uid = str(row["uid"])
-            region = f"{row['gp']} ({row['block']})"[:30]
-            sigs = str(row["flags"])
-            # Join top 2 notes to keep it reasonably short
-            notes = " | ".join(row["flag_notes"][:2]) if row["flag_notes"] else "General Anomaly"
+            table_rows.append(
+                [
+                    Paragraph(name, cell_style),
+                    Paragraph(uid, cell_style),
+                    Paragraph(district, cell_style),
+                    Paragraph(region, cell_style),
+                    Paragraph(sigs, cell_style),
+                    Paragraph(rules_text, cell_style),
+                    Paragraph(note_text, cell_style),
+                ]
+            )
 
-            # Since cells can't easily wrap without multi_cell, we do a simple truncation for now
-            # In a production environment, we'd use a more complex table generator
-            pdf.cell(w[0], 10, name, border=1)
-            pdf.cell(w[1], 10, uid, border=1)
-            pdf.cell(w[2], 10, region, border=1)
-            pdf.cell(w[3], 10, sigs, border=1, align="C")
-            pdf.cell(w[4], 10, notes[:40] + "...", border=1)
-            pdf.ln()
+        table = Table(
+            table_rows,
+            colWidths=[30 * mm, 28 * mm, 30 * mm, 36 * mm, 12 * mm, 58 * mm, 75 * mm],
+            repeatRows=1,
+            hAlign="LEFT",
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E2E8F0")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, 0), 8),
+                    ("ALIGN", (3, 1), (3, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                ]
+            )
+        )
+        story.append(table)
 
-        # Output to bytes
-        pdf_bytes = pdf.output()
+        doc.build(story)
+        pdf_bytes = pdf_buffer.getvalue()
+        pdf_buffer.close()
+        selected_rule_token = "-".join(selected_rules) if selected_rules else "ALL"
+        selected_district_token = district_filter.replace(" ", "_").upper() if district_filter else "ALL"
+        filename = (
+            f"USR_Forensic_Field_Brief_{selected_rule_token}_{selected_district_token}_"
+            f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.pdf"
+        )
+
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={"Content-Disposition": "attachment; filename=USR_Forensic_Field_Brief.pdf"},
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
     except Exception as e:

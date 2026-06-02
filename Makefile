@@ -5,7 +5,7 @@
 # Variables
 DOCKER_COMPOSE = -f docker-compose.yml
 DOCKER = docker compose
-BACKEND_PORT = 8081
+BACKEND_PORT = 8082
 FRONTEND_PORT = 5177
 LOG_DIR_BACKEND = logs/backend
 LOG_DIR_FRONTEND = logs/frontend
@@ -58,11 +58,16 @@ backend-start:
 	@: > $(LOG_DIR_BACKEND)/app.log
 	@: > $(LOG_DIR_FRONTEND)/app.log
 	@echo "Starting backend..."
+	@$(MAKE) backend-stop >/dev/null 2>&1 || true
 	@cd backend && nohup sh -cl "uv run python -m uvicorn src.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload" > ../$(LOG_DIR_BACKEND)/app.log 2>&1 &
 
 backend-stop:
 	@echo "Stopping backend..."
-	@bash -lc "pids=\$$(pgrep -f '[u]vicorn src.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload' || true); [ -n \"\$$pids\" ] && kill \$$pids || true"
+	@fuser -k -TERM $(BACKEND_PORT)/tcp >/dev/null 2>&1 || true
+	@bash -lc "pids=\$$(ps -eo pid=,args= | awk '/uvicorn src.main:app/ && !/awk/ {print \$$1}'); [ -n \"\$$pids\" ] && kill -TERM \$$pids || true"
+	@sleep 1
+	@fuser -k -KILL $(BACKEND_PORT)/tcp >/dev/null 2>&1 || true
+	@bash -lc "pids=\$$(ps -eo pid=,args= | awk '/uvicorn src.main:app/ && !/awk/ {print \$$1}'); [ -n \"\$$pids\" ] && kill -KILL \$$pids || true"
 
 logs-backend:
 	tail -f $(LOG_DIR_BACKEND)/app.log

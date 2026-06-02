@@ -1,4 +1,5 @@
 import uuid
+import re
 from typing import List, Optional
 
 from qdrant_client import AsyncQdrantClient
@@ -17,6 +18,15 @@ from src.core.logger import logger
 settings = get_settings()
 
 _client: Optional[AsyncQdrantClient] = None
+
+
+def _extract_scheme_id_from_filename(filename: str) -> Optional[str]:
+    if not filename:
+        return None
+    match = re.search(r"\b([A-Z]\d{3,5})\b", filename.upper())
+    if match:
+        return match.group(1)
+    return None
 
 
 def get_qdrant_client() -> AsyncQdrantClient:
@@ -71,6 +81,7 @@ async def upsert_chunks(
         Number of points upserted.
     """
     client = get_qdrant_client()
+    scheme_id = _extract_scheme_id_from_filename(filename)
 
     points = [
         PointStruct(
@@ -84,6 +95,7 @@ async def upsert_chunks(
                 "chunk_index": chunk.get("chunk_index", i),
                 "page": chunk.get("page"),
                 "element_type": chunk.get("element_type", "text"),
+                "scheme_id": scheme_id,
             },
         )
         for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
@@ -98,6 +110,7 @@ async def search_chunks(
     query_embedding: List[float],
     top_k: int = 10,
     document_ids: Optional[List[str]] = None,
+    scheme_id: Optional[str] = None,
 ) -> List[dict]:
     """
     Search for the most relevant chunks by vector similarity.
@@ -113,17 +126,25 @@ async def search_chunks(
     client = get_qdrant_client()
 
     query_filter = None
+    must_conditions = []
     if document_ids:
         from qdrant_client.models import MatchAny
 
-        query_filter = Filter(
-            must=[
-                FieldCondition(
-                    key="document_id",
-                    match=MatchAny(any=document_ids),
-                )
-            ]
+        must_conditions.append(
+            FieldCondition(
+                key="document_id",
+                match=MatchAny(any=document_ids),
+            )
         )
+    if scheme_id:
+        must_conditions.append(
+            FieldCondition(
+                key="scheme_id",
+                match=MatchValue(value=scheme_id.upper()),
+            )
+        )
+    if must_conditions:
+        query_filter = Filter(must=must_conditions)
 
     # Search for relevant chunks
     try:
@@ -156,6 +177,7 @@ async def search_chunks(
             "chunk_index": hit.payload.get("chunk_index"),
             "page": hit.payload.get("page"),
             "element_type": hit.payload.get("element_type"),
+            "scheme_id": hit.payload.get("scheme_id"),
         }
         for hit in hits
     ]

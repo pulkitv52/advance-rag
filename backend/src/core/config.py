@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     NIM_RERANK_MODEL: str = "nv-rerank-qa-mistral-4b:1"
     NIM_RERANK_URL: str = "https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking"
 
+    # --- Sarvam Voice ---
+    SARVAM_API_KEY: str = ""
+    SARVAM_TTS_STREAM_URL: str = "https://api.sarvam.ai/text-to-speech/stream"
+    SARVAM_STT_URL: str = "https://api.sarvam.ai/speech-to-text"
+
     model_config = SettingsConfigDict(
         # Search in current and parent directory (from project root)
         env_file=(".env", "../.env"),

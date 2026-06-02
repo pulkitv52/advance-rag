@@ -13,6 +13,9 @@ import {
   MessageSquareText,
   CheckSquare,
   Landmark,
+  Mic,
+  Square,
+  Volume2,
 } from 'lucide-react'
 import ForceGraph2D from 'react-force-graph-2d'
 import axios from 'axios'
@@ -108,6 +111,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "./components/ui/avatar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
 import { EligibilityStudio } from "./components/EligibilityStudio"
 import { UsrDashboard } from "./components/UsrDashboard"
+import { convertAudioBlobToWav, requestSTTTranscript } from "./lib/voice"
 
 
 const API = (import.meta as any).env.VITE_API_BASE_URL || 'http://localhost:8081'
@@ -149,6 +153,12 @@ interface Project {
   name: string
   description?: string | null
   created_at: string
+}
+
+interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  result?: QueryResult
 }
 
 // Unified parser to render text content by converting <br> tags into <br /> elements
@@ -473,6 +483,16 @@ const applySchemeFocusedLayout = (
 
   return nodes
 }
+const GovWestBengalEmblem = () => (
+  <img 
+    src="/wb_logo.png" 
+    alt="Govt. of West Bengal Logo" 
+    className="w-16 h-16 object-contain shrink-0 transition-transform duration-300 hover:scale-105" 
+  />
+)
+
+const GOVT_HERO_BG =
+  "https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Victoria_Memorial%2C_Kolkata.jpg/1280px-Victoria_Memorial%2C_Kolkata.jpg"
 
 export default function App() {
   const [, setDocuments] = useState<Document[]>([])
@@ -488,7 +508,263 @@ export default function App() {
   const [result, setResult] = useState<QueryResult | null>(null)
   const [selectedSource, setSelectedSource] = useState<Source | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [chatHistory, setChatHistory] = useState<{role: string, content: string}[]>([])
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([])
+  const chatEndRef = useRef<HTMLDivElement>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const speechRecognitionRef = useRef<any>(null)
+  const speechBaseQueryRef = useRef<string>("")
+  const isRecordingRef = useRef<boolean>(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [isTranscribing, setIsTranscribing] = useState(false)
+  const [speakingMessageIndex, setSpeakingMessageIndex] = useState<number | null>(null)
+  const [voiceLanguage, setVoiceLanguage] = useState<'en-IN' | 'hi-IN'>('en-IN')
+  const [sttMode, setSttMode] = useState<'live' | 'accurate'>('accurate')
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatHistory, querying])
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording
+  }, [isRecording])
+
+  const handleStartRecording = async () => {
+    if (sttMode === 'live') {
+      const SpeechRecognitionApi =
+        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+      if (!SpeechRecognitionApi) {
+        setError("Live STT is not supported in this browser. Switch to Accurate mode.")
+        return
+      }
+      setError(null)
+      const recognition = new SpeechRecognitionApi()
+      speechRecognitionRef.current = recognition
+      speechBaseQueryRef.current = query.trim()
+      recognition.lang = voiceLanguage
+      recognition.continuous = true
+      recognition.interimResults = true
+
+      recognition.onresult = (event: any) => {
+        let finalTranscript = ""
+        let interimTranscript = ""
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const transcript = String(event.results[i][0]?.transcript || "").trim()
+          if (!transcript) continue
+          if (event.results[i].isFinal) finalTranscript += `${transcript} `
+          else interimTranscript += `${transcript} `
+        }
+        const combined = `${finalTranscript}${interimTranscript}`.trim()
+        const base = speechBaseQueryRef.current
+        setQuery(combined ? `${base}${base ? " " : ""}${combined}` : base)
+      }
+
+      recognition.onend = () => {
+        if (isRecordingRef.current) {
+          try {
+            recognition.start()
+          } catch {
+            // Ignore recognition restart races.
+          }
+        }
+      }
+
+      recognition.onerror = (event: any) => {
+        if (event?.error === "not-allowed") setError("Microphone permission denied.")
+      }
+
+      try {
+        recognition.start()
+        setIsRecording(true)
+      } catch (speechError: any) {
+        setError(speechError?.message || "Unable to start live speech recognition.")
+      }
+      return
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setError("Your browser does not support microphone recording.")
+      return
+    }
+
+    setError(null)
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      audioChunksRef.current = []
+      mediaRecorderRef.current = recorder
+
+      recorder.ondataavailable = (event: BlobEvent) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data)
+        }
+      }
+
+      recorder.onstop = async () => {
+        const tracks = stream.getTracks()
+        tracks.forEach((track) => track.stop())
+        setIsRecording(false)
+
+        if (audioChunksRef.current.length === 0) return
+
+        setIsTranscribing(true)
+        try {
+          const rawAudioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+          const audioBlob = await convertAudioBlobToWav(rawAudioBlob)
+          const { transcript } = await requestSTTTranscript(API, {
+            file: audioBlob,
+            filename: "query.wav",
+            language_code: voiceLanguage,
+          })
+          if (transcript) {
+            setQuery((prev) => `${prev}${prev.trim() ? " " : ""}${transcript}`.trim())
+          } else {
+            setError("Speech recognized, but no transcript was returned.")
+          }
+        } catch (sttError: any) {
+          setError(sttError?.response?.data?.detail || "Voice transcription failed.")
+        } finally {
+          setIsTranscribing(false)
+        }
+      }
+
+      recorder.start()
+      setIsRecording(true)
+    } catch (recordError: any) {
+      setError(recordError?.message || "Unable to access microphone.")
+      setIsRecording(false)
+    }
+  }
+
+  const handleStopRecording = () => {
+    const recognition = speechRecognitionRef.current
+    if (recognition) {
+      setIsRecording(false)
+      try {
+        recognition.stop()
+      } catch {
+        // ignore
+      }
+      speechRecognitionRef.current = null
+      return
+    }
+
+    const recorder = mediaRecorderRef.current
+    if (!recorder || recorder.state === 'inactive') return
+    recorder.stop()
+  }
+
+  const handleSpeakAnswer = async (messageIndex: number, text: string) => {
+    if (!text?.trim()) return
+    setError(null)
+    setSpeakingMessageIndex(messageIndex)
+    try {
+      const toSpeechText = (raw: string): string => {
+        let cleaned = String(raw || "")
+        // Remove fenced code blocks and inline code
+        cleaned = cleaned.replace(/```[\s\S]*?```/g, " ")
+        cleaned = cleaned.replace(/`([^`]+)`/g, "$1")
+        // Convert markdown links [text](url) -> text
+        cleaned = cleaned.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+        // Strip markdown emphasis/heading markers
+        cleaned = cleaned.replace(/[*_~#>-]+/g, " ")
+        // Remove table separators and pipes
+        cleaned = cleaned.replace(/\|/g, " ")
+        cleaned = cleaned.replace(/-{3,}/g, " ")
+        // Remove source/citation tokens like [Source 1], 【Source 2】
+        cleaned = cleaned.replace(/(?:\[|【)\s*Source\s*\d+\s*(?:\]|】)/gi, " ")
+        // Normalize whitespace
+        cleaned = cleaned.replace(/\s+/g, " ").trim()
+        return cleaned
+      }
+
+      const synth = window.speechSynthesis
+      if (!synth) {
+        setSpeakingMessageIndex(null)
+        setError("Speech playback is not supported in this browser.")
+        return
+      }
+
+      const pickBestIndianVoice = (langCode: 'en-IN' | 'hi-IN'): SpeechSynthesisVoice | null => {
+        const voices = synth.getVoices() || []
+        if (!voices.length) return null
+        const targetPrefix = langCode.toLowerCase().startsWith("hi") ? "hi" : "en"
+        const strongMatch = voices.find((v) => String(v.lang || "").toLowerCase() === langCode.toLowerCase())
+        if (strongMatch) return strongMatch
+
+        const indianHints = ["india", "indian", "aditi", "hindi", "bharat"]
+        const hinted = voices.find((v) => {
+          const name = String(v.name || "").toLowerCase()
+          const lang = String(v.lang || "").toLowerCase()
+          const hasHint = indianHints.some((h) => name.includes(h))
+          return lang.startsWith(`${targetPrefix}-`) && hasHint
+        })
+        if (hinted) return hinted
+
+        const familyMatch = voices.find((v) => String(v.lang || "").toLowerCase().startsWith(`${targetPrefix}-`))
+        return familyMatch || null
+      }
+
+      const normalized = toSpeechText(text)
+      if (!normalized) {
+        setSpeakingMessageIndex(null)
+        setError("No readable text found for speech.")
+        return
+      }
+      const chunks: string[] = []
+      const maxChunk = 220
+      let cursor = 0
+      while (cursor < normalized.length) {
+        let end = Math.min(cursor + maxChunk, normalized.length)
+        if (end < normalized.length) {
+          const split = Math.max(
+            normalized.lastIndexOf(". ", end),
+            normalized.lastIndexOf(", ", end),
+            normalized.lastIndexOf(" ", end),
+          )
+          if (split > cursor + 60) {
+            end = split + 1
+          }
+        }
+        const part = normalized.slice(cursor, end).trim()
+        if (part) chunks.push(part)
+        cursor = end
+      }
+
+      synth.cancel()
+      const selectedVoice = pickBestIndianVoice(voiceLanguage)
+
+      const speakChunk = (index: number) => {
+        if (index >= chunks.length) {
+          setSpeakingMessageIndex((current) => (current === messageIndex ? null : current))
+          return
+        }
+        const utterance = new SpeechSynthesisUtterance(chunks[index])
+        utterance.lang = voiceLanguage
+        if (selectedVoice) utterance.voice = selectedVoice
+        utterance.rate = 0.95
+        utterance.pitch = 1.0
+        utterance.onend = () => speakChunk(index + 1)
+        utterance.onerror = () => {
+          setSpeakingMessageIndex((current) => (current === messageIndex ? null : current))
+          setError("Unable to play speech.")
+        }
+        synth.speak(utterance)
+      }
+
+      speakChunk(0)
+    } catch (speechError: any) {
+      setSpeakingMessageIndex((current) => (current === messageIndex ? null : current))
+      setError(speechError?.message || "Text-to-speech failed.")
+    }
+  }
+
+  const handleStopSpeaking = () => {
+    const synth = window.speechSynthesis
+    if (!synth) return
+    synth.cancel()
+    setSpeakingMessageIndex(null)
+  }
 
   // Graph States
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], links: [] })
@@ -679,21 +955,32 @@ export default function App() {
   }
 
   const handleQuery = async () => {
-    if (!query.trim()) return
+    if (isRecording) {
+      handleStopRecording()
+    }
+    const currentQuery = query.trim()
+    if (!currentQuery) return
     setQuerying(true)
-    setResult(null)
+    setQuery('')
     setError(null)
     setSelectedSource(null)
     try {
       const payload = {
-        query,
+        query: currentQuery,
         top_k: 10,
         document_ids: selectedIds.size > 0 ? Array.from(selectedIds) : null,
-        history: chatHistory.length > 0 ? chatHistory : null
+        history: chatHistory.length > 0 ? chatHistory.map(h => ({ role: h.role, content: h.content })) : null
       }
+      setChatHistory(prev => [...prev, { role: 'user', content: currentQuery }])
+      
       const res = await axios.post(`${API}/query/`, payload)
-      setResult({ ...res.data, project_id: selectedProjectId || null })
-      setChatHistory(prev => [...prev, { role: 'user', content: query }, { role: 'assistant', content: res.data.answer }])
+      const resData = { ...res.data, project_id: selectedProjectId || null }
+      
+      setResult(resData)
+      setChatHistory(prev => [
+        ...prev,
+        { role: 'assistant', content: res.data.answer, result: resData }
+      ])
     } catch (e: any) {
       setError(e.response?.data?.detail || 'Query failed.')
     } finally {
@@ -902,7 +1189,7 @@ export default function App() {
   })
 
   return (
-    <div className="flex h-screen w-full bg-[#f8f9fa] text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden">
+    <div className="flex h-screen w-full bg-[#f4f7fb] text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden border-t-4 border-[#FF9933]">
       <TooltipProvider>
         <Tabs
           value={activeTab}
@@ -913,9 +1200,13 @@ export default function App() {
           className="flex h-screen w-full overflow-hidden flex-1"
         >
           {/* ── Left Sidebar: Navigation ── */}
-          <nav className="w-48 flex flex-col py-6 border-r border-slate-200 bg-white shrink-0 z-30 px-5">
-          <div className="mb-10 w-full flex justify-center">
-            <img src="/kpmg_logo.png" alt="KPMG" className="w-20 h-auto object-contain" />
+          <nav className="w-48 flex flex-col py-6 border-r border-slate-200 bg-white shrink-0 z-30 px-4">
+          <div className="mb-6 w-full flex flex-col items-center text-center gap-2 border-b border-slate-100 pb-5">
+            <GovWestBengalEmblem />
+            <div className="space-y-0.5 mt-1">
+              <p className="text-[10px] font-black text-slate-900 tracking-tight leading-none uppercase">Govt. of West Bengal</p>
+              <p className="text-[9px] font-bold text-slate-500 uppercase tracking-tight leading-none">Finance Department</p>
+            </div>
           </div>
 
           <div className="w-full mb-6">
@@ -934,35 +1225,35 @@ export default function App() {
           </div>
 
           {/* Sidebar Navigation Tabs */}
-          <div className="flex-1 w-full py-6 space-y-1">
+          <div className="flex-1 w-full py-2 space-y-1">
             <div className="px-1 mb-3">
               <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 font-mono">Intelligence Hub</h2>
             </div>
             <TabsList className="flex flex-col bg-transparent p-0 rounded-none h-auto w-full gap-1.5 border-none">
               <TabsTrigger
                 value="research"
-                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-[#0B4C8C] data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
               >
                 <MessageSquareText className="w-4 h-4 shrink-0" />
-                Research Chat
+                Policy Research
               </TabsTrigger>
               <TabsTrigger
                 value="map"
-                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-[#0B4C8C] data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
               >
                 <Network className="w-4 h-4 shrink-0" />
-                Knowledge Map
+                Registry Graph
               </TabsTrigger>
               <TabsTrigger
                 value="eligibility"
-                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-[#0B4C8C] data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
               >
                 <CheckSquare className="w-4 h-4 shrink-0" />
-                Eligibility
+                Eligibility Studio
               </TabsTrigger>
               <TabsTrigger
                 value="registry"
-                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
+                className="w-full justify-start rounded-xl px-4 py-3 text-[11px] font-bold uppercase tracking-widest text-slate-500 hover:bg-slate-50 hover:text-slate-900 data-[state=active]:bg-[#0B4C8C] data-[state=active]:text-white data-[state=active]:shadow-sm transition-all duration-200 flex items-center gap-2.5 border-none"
               >
                 <Landmark className="w-4 h-4 shrink-0" />
                 Social Registry
@@ -970,19 +1261,26 @@ export default function App() {
             </TabsList>
           </div>
 
-          <div className="mt-auto w-full flex items-center justify-between px-2">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button className="text-slate-400 hover:text-slate-900 transition-colors p-2 hover:bg-slate-100 rounded-lg">
-                  <Settings className="w-4 h-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="right"><p>Enterprise Settings</p></TooltipContent>
-            </Tooltip>
-            <Avatar className="w-8 h-8 ring-2 ring-slate-100">
-              <AvatarImage src="https://github.com/shadcn.png" />
-              <AvatarFallback>AD</AvatarFallback>
-            </Avatar>
+          <div className="mt-auto w-full pt-4 border-t border-slate-100 space-y-4">
+            <div className="flex flex-col items-center gap-1 py-2 bg-slate-50 rounded-xl border border-slate-100">
+              <span className="text-[8px] font-extrabold uppercase tracking-widest text-slate-400">Technical Partner</span>
+              <img src="/kpmg_logo.png" alt="KPMG" className="h-4 w-auto object-contain opacity-70 hover:opacity-100 transition-opacity" />
+            </div>
+            
+            <div className="flex items-center justify-between px-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button className="text-slate-400 hover:text-slate-900 transition-colors p-2 hover:bg-slate-100 rounded-lg">
+                    <Settings className="w-4 h-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right"><p>Enterprise Settings</p></TooltipContent>
+              </Tooltip>
+              <Avatar className="w-7 h-7 ring-2 ring-slate-100">
+                <AvatarImage src="https://github.com/shadcn.png" />
+                <AvatarFallback>AD</AvatarFallback>
+              </Avatar>
+            </div>
           </div>
         </nav>
 
@@ -991,26 +1289,44 @@ export default function App() {
           {/* Workspace Side */}
           <div className="flex-1 flex flex-col bg-white overflow-hidden relative">
             {/* Conditionally hide standard header for Registry for full-screen immersion */}
-            <header className={`h-16 border-b border-slate-100 flex items-center justify-between px-10 shrink-0 ${activeTab === 'registry' ? 'hidden' : ''}`}>
+            <header className={`h-20 border-b border-slate-100 flex flex-col justify-center px-10 shrink-0 bg-white ${activeTab === 'registry' ? 'hidden' : ''}`}>
+              <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-100 pb-2">
+                <p>Government Service Intelligence Portal</p>
+                <p className="text-slate-400">Citizen-first | Secure | Explainable</p>
+              </div>
+              <div className="h-0.5 w-full bg-gradient-to-r from-[#FF9933] via-white to-[#138808]" />
+              <div className="flex items-center justify-between pt-2">
               <div className="flex items-center gap-4">
-                <Badge variant="outline" className="rounded-lg border-slate-200 text-slate-500 font-mono text-[9px] tracking-widest px-2 py-0.5">V2.4.0 STABLE</Badge>
-                <Separator orientation="vertical" className="h-4 bg-slate-200" />
-                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Context: <span className="text-slate-900">{selectedIds.size > 0 ? `${selectedIds.size} Selective` : 'Full Knowledge Base'}</span></p>
                 <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Project: <span className="text-slate-900">{activeProject?.name || 'Select Project'}</span></p>
               </div>
               <div className="flex items-center gap-3">
-                <Button variant="ghost" size="sm" onClick={saveCurrentAnalysis} disabled={!result || savingAnalysis} className="text-[10px] font-bold uppercase text-slate-400 hover:text-slate-900 transition-colors disabled:opacity-50">
-                  {savingAnalysis ? 'Saving...' : 'Save Analysis'}
-                </Button>
-                <Button
-                  variant="default"
-                  size="sm"
-                  disabled={!result}
-                  onClick={handleExportReport}
-                  className="bg-slate-900 text-white rounded-lg px-4 h-8 text-[11px] font-bold shadow-lg shadow-slate-200 disabled:opacity-50"
-                >
-                  Export Report
-                </Button>
+                {activeTab === 'research' && chatHistory.length > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setChatHistory([])
+                      setResult(null)
+                      setError(null)
+                      setSelectedSource(null)
+                    }}
+                    className="text-[10px] font-bold uppercase text-rose-500 hover:text-rose-700 hover:bg-rose-50/50 transition-colors rounded-xl px-3 h-8"
+                  >
+                    Reset Session
+                  </Button>
+                )}
+                {activeTab === 'research' && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    disabled={!result}
+                    onClick={handleExportReport}
+                    className="bg-slate-900 text-white rounded-lg px-4 h-8 text-[11px] font-bold shadow-lg shadow-slate-200 disabled:opacity-50"
+                  >
+                    Export Report
+                  </Button>
+                )}
+              </div>
               </div>
             </header>
 
@@ -1026,15 +1342,233 @@ export default function App() {
 
               <TabsContent value="research" className="flex-1 flex flex-col overflow-hidden min-h-0 mt-0 m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
                 <ScrollArea className="flex-1 h-full">
-                  <div className="max-w-4xl mx-auto px-10 pt-14 pb-32 space-y-12">
-                    {/* Hero Area */}
-                    {!result && !querying && (
-                      <div className="py-20 flex flex-col items-center justify-center opacity-30">
-                        <div className="w-16 h-16 rounded-3xl bg-slate-50 border border-slate-100 flex items-center justify-center mb-6">
-                          <Zap className="w-8 h-8 text-slate-400 fill-slate-400" />
+                  <div className="w-full max-w-[1300px] mx-auto px-6 lg:px-10 pt-10 pb-32 space-y-10">
+                    {/* Hero Welcome Area */}
+                    {chatHistory.length === 0 && !querying && (
+                      <div className="relative overflow-hidden rounded-3xl border border-slate-200 shadow-lg animate-in fade-in duration-700 min-h-[360px]">
+                        <div
+                          className="absolute inset-0 bg-cover bg-center"
+                          style={{ backgroundImage: `url(${GOVT_HERO_BG})` }}
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-r from-[#0B2E59]/90 via-[#0B2E59]/75 to-[#0B2E59]/65" />
+                        <div className="relative z-10 p-10 md:p-12 text-white">
+                          <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-1.5 border border-white/20">
+                            <Zap className="w-3.5 h-3.5 text-[#FF9933]" />
+                            <span className="text-[10px] font-bold uppercase tracking-widest">Official Knowledge Assistant</span>
+                          </div>
+                          <h1 className="mt-5 text-3xl md:text-4xl font-black tracking-tight leading-tight">
+                            Citizen Services Intelligence Platform
+                          </h1>
+                          <p className="mt-4 text-sm md:text-base text-slate-100 max-w-2xl leading-relaxed">
+                            Search verified scheme information, policy context, and eligibility evidence through a transparent and auditable government-grade interface.
+                          </p>
+                          <div className="mt-8 flex flex-wrap gap-3 text-[11px] font-bold uppercase tracking-wider">
+                            <span className="rounded-full bg-white/10 border border-white/20 px-4 py-2">Trusted Sources</span>
+                            <span className="rounded-full bg-white/10 border border-white/20 px-4 py-2">Policy Research</span>
+                            <span className="rounded-full bg-white/10 border border-white/20 px-4 py-2">Registry Insights</span>
+                          </div>
                         </div>
-                        <h1 className="text-xl font-bold text-slate-900 mb-2">Internal Research Engine</h1>
-                        <p className="text-sm text-slate-500 text-center max-w-sm">Select documents in the sidebar and initiate a semantic inquiry below to begin deep synthesis.</p>
+                      </div>
+                    )}
+
+                    {/* Chat Conversational History Stream */}
+                    {chatHistory.length > 0 && (
+                      <div className="space-y-8 flex flex-col">
+                        {chatHistory.map((message, messageIndex) => {
+                          if (message.role === 'user') {
+                            return (
+                              <div key={`user-${messageIndex}`} className="flex justify-end animate-in slide-in-from-bottom-2 duration-300">
+                                <div className="bg-slate-900 text-white rounded-3xl rounded-tr-none px-6 py-4 max-w-[92%] lg:max-w-[85%] shadow-sm hover:shadow-md transition-shadow">
+                                  <p className="text-sm font-semibold tracking-wide leading-relaxed">{message.content}</p>
+                                </div>
+                              </div>
+                            )
+                          }
+
+                          // Assistant Turn Card
+                          const resData = message.result
+                          if (!resData) return null
+
+                          return (
+                            <div key={`assistant-${messageIndex}`} className="flex justify-start animate-in fade-in duration-500">
+                              <Card className="w-full bg-white border border-slate-100 p-6 rounded-3xl shadow-sm space-y-6">
+                                {resData.weak_claims && resData.weak_claims.length > 0 && (
+                                  <Card className="rounded-2xl border-amber-100 bg-amber-50/80 p-4">
+                                    <p className="text-[10px] font-bold uppercase tracking-widest text-amber-700 mb-2">Evidence Warnings</p>
+                                    <div className="space-y-1">
+                                      {resData.weak_claims.map((claim, index) => (
+                                        <p key={`${claim}-${index}`} className="text-sm font-medium text-amber-900">{claim}</p>
+                                      ))}
+                                    </div>
+                                  </Card>
+                                )}
+
+                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+                                  <div className="space-y-1">
+                                    <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-300">Analysis Output</p>
+                                    <p className="text-[10px] text-slate-400 font-medium">Verified RAG Synthesis</p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleSpeakAnswer(messageIndex, resData.answer)}
+                                      disabled={speakingMessageIndex === messageIndex}
+                                      className="h-7 rounded-full px-3 text-[10px] font-bold uppercase tracking-wide"
+                                    >
+                                      {speakingMessageIndex === messageIndex ? (
+                                        <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                      ) : (
+                                        <Volume2 className="w-3 h-3 mr-1" />
+                                      )}
+                                      Speak
+                                    </Button>
+                                    {speakingMessageIndex === messageIndex && (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={handleStopSpeaking}
+                                        className="h-7 rounded-full px-3 text-[10px] font-bold uppercase tracking-wide"
+                                      >
+                                        <Square className="w-3 h-3 mr-1" />
+                                        Stop
+                                      </Button>
+                                    )}
+                                    {resData.confidence_score !== undefined && (
+                                      <TooltipProvider>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100/60 shadow-sm cursor-help hover:bg-emerald-100/50 transition-colors">
+                                              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                              <span>{Math.round(resData.confidence_score * 100)}% Confidence</span>
+                                            </div>
+                                          </TooltipTrigger>
+                                          <TooltipContent className="bg-slate-950 text-white border-none p-3 rounded-xl shadow-2xl max-w-xs">
+                                            <p className="font-bold text-xs mb-1">Synthesized Answer Confidence</p>
+                                            <p className="text-[10px] text-slate-400 font-medium">Measures semantic alignment, document support, and absence of logical contradictions in the final response.</p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TooltipProvider>
+                                    )}
+
+                                    {resData.citation_coverage !== undefined && (
+                                      <TooltipProvider>
+                                        <Tooltip>
+                                          <TooltipTrigger asChild>
+                                            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold bg-violet-50 text-violet-700 border border-violet-100/60 shadow-sm cursor-help hover:bg-violet-100/50 transition-colors">
+                                              <FileText className="w-3.5 h-3.5 text-violet-500" />
+                                              <span>{Math.round(resData.citation_coverage * 100)}% Grounding</span>
+                                            </div>
+                                          </TooltipTrigger>
+                                          <TooltipContent className="bg-slate-950 text-white border-none p-3 rounded-xl shadow-2xl max-w-xs">
+                                            <p className="font-bold text-xs mb-1">Citation Grounding Ratio</p>
+                                            <p className="text-[10px] text-slate-400 font-medium">Represents the proportion of statements in the answer backed by explicit source citations.</p>
+                                          </TooltipContent>
+                                        </Tooltip>
+                                      </TooltipProvider>
+                                    )}
+
+                                    <TooltipProvider>
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <div className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold border shadow-sm cursor-help transition-colors
+                                            ${resData.graph_enrichment_used 
+                                              ? 'bg-blue-50 text-blue-700 border-blue-100/60 hover:bg-blue-100/50' 
+                                              : 'bg-slate-50 text-slate-500 border-slate-100 hover:bg-slate-100/50'}`}
+                                          >
+                                            <Network className={`w-3.5 h-3.5 ${resData.graph_enrichment_used ? 'text-blue-500' : 'text-slate-400'}`} />
+                                            <span>{resData.graph_enrichment_used ? 'Graph Active' : 'Vector Only'}</span>
+                                          </div>
+                                        </TooltipTrigger>
+                                        <TooltipContent className="bg-slate-950 text-white border-none p-3 rounded-xl shadow-2xl max-w-xs">
+                                          <p className="font-bold text-xs mb-1">Knowledge Graph Integration</p>
+                                          <p className="text-[10px] text-slate-400 font-medium">
+                                            {resData.graph_enrichment_used 
+                                              ? 'Relational graph query was automatically triggered to enrich this answer with multi-hop connections.'
+                                              : 'Answer synthesizes vectorized document chunks only.'}
+                                          </p>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    </TooltipProvider>
+                                  </div>
+                                </div>
+
+                                <div className="prose prose-slate max-w-none text-[15px] leading-[1.8] text-slate-800 font-medium border-l-4 border-slate-900 pl-8 transition-all hover:bg-slate-50/50 py-2 rounded-r-2xl
+                                   prose-headings:text-slate-900 prose-headings:font-bold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
+                                   prose-p:mb-4 prose-ul:list-disc prose-ul:pl-6 prose-li:mb-1
+                                   prose-table:w-full prose-table:table-fixed prose-table:border prose-table:border-slate-200 prose-th:bg-slate-50 prose-th:p-2 prose-td:p-2 prose-td:border-t prose-td:align-top">
+                                  <ReactMarkdown
+                                    remarkPlugins={[remarkGfm]}
+                                    components={{
+                                      a: ({ node, ...props }) => {
+                                        const isSource = props.href?.startsWith('#source-');
+                                        if (isSource && resData) {
+                                          const index = parseInt(props.href!.split('-')[1]) - 1;
+                                          const source = resData.sources[index];
+                                          if (source) {
+                                            const baseName = source.filename.split(/[/\\]/).pop() || source.filename;
+                                            const cleanName = baseName.replace(/\.pdf$/i, '');
+                                            const displayName = cleanName.length > 20 ? cleanName.substring(0, 17) + '...' : cleanName;
+                                            const sourceLabel = source.page ? `${displayName} (p. ${source.page})` : displayName;
+                                            return (
+                                              <TooltipProvider>
+                                                <Tooltip>
+                                                  <TooltipTrigger asChild>
+                                                    <span
+                                                      onClick={() => setSelectedSource(source)}
+                                                      className="inline-flex items-center gap-1 bg-slate-100 text-slate-900 px-2 py-0.5 rounded-md font-bold text-[10px] cursor-pointer hover:bg-slate-900 hover:text-white transition-colors mx-0.5"
+                                                    >
+                                                      <FileText className="w-2.5 h-2.5 shrink-0 text-slate-500" />
+                                                      {sourceLabel}
+                                                    </span>
+                                                  </TooltipTrigger>
+                                                  <TooltipContent className="bg-slate-900 text-white border-none p-3 rounded-xl shadow-2xl">
+                                                    <div className="space-y-1">
+                                                      <p className="text-[10px] font-bold truncate max-w-[200px]">{source.filename}</p>
+                                                      <p className="text-[9px] text-slate-400 font-medium uppercase tracking-tighter">Verified Grounding | Page {source.page || 'N/A'}</p>
+                                                    </div>
+                                                  </TooltipContent>
+                                                </Tooltip>
+                                              </TooltipProvider>
+                                            );
+                                          }
+                                        }
+                                        return <a {...props} className="text-slate-900 underline decoration-slate-200 underline-offset-4 hover:decoration-slate-900 transition-all font-bold" />;
+                                      },
+                                      code: ({ node, className, children, ...props }) => {
+                                        const match = /language-(\w+)/.exec(className || '');
+                                        const lang = match ? match[1] : '';
+
+                                        if (lang === 'json') {
+                                          try {
+                                            const raw = String(children).trim();
+                                            const cleanJson = raw.replace(':chart', '').trim();
+                                            const config = JSON.parse(cleanJson);
+
+                                            if (config && typeof config === 'object' && config.type && Array.isArray(config.data)) {
+                                              return <DynamicChart config={config} />;
+                                            }
+                                          } catch (e) {
+                                            return <code className={className} {...props}>{children}</code>;
+                                          }
+                                        }
+
+                                        return <code className={className} {...props}>{children}</code>;
+                                      },
+                                      p: ({ node, ...props }) => <p {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</p>,
+                                      td: ({ node, ...props }) => <td {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</td>,
+                                      th: ({ node, ...props }) => <th {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</th>,
+                                      li: ({ node, ...props }) => <li {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</li>
+                                    }}
+                                  >
+                                    {resData.answer}
+                                  </ReactMarkdown>
+                                </div>
+
+                              </Card>
+                            </div>
+                          )
+                        })}
                       </div>
                     )}
 
@@ -1048,138 +1582,26 @@ export default function App() {
                       </Card>
                     )}
 
-                    {result && (
-                      <div className="space-y-12 animate-in fade-in duration-700">
-                        <div className="space-y-6">
-                          <div className="flex flex-wrap gap-3">
-                            <Card className="rounded-2xl border-slate-100 px-4 py-3 bg-slate-50/70">
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Confidence</p>
-                              <p className="text-lg font-bold text-slate-900">{result.confidence_score ? `${Math.round(result.confidence_score * 100)}%` : 'N/A'}</p>
-                            </Card>
-                            <Card className="rounded-2xl border-slate-100 px-4 py-3 bg-slate-50/70">
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Citation Coverage</p>
-                              <p className="text-lg font-bold text-slate-900">{result.citation_coverage ? `${Math.round(result.citation_coverage * 100)}%` : 'N/A'}</p>
-                            </Card>
-                            <Card className="rounded-2xl border-slate-100 px-4 py-3 bg-slate-50/70">
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Graph</p>
-                              <p className="text-lg font-bold text-slate-900">{result.graph_enrichment_used ? 'Enabled' : 'Not Used'}</p>
-                            </Card>
-                          </div>
-                          {result.weak_claims && result.weak_claims.length > 0 && (
-                            <Card className="rounded-2xl border-amber-100 bg-amber-50/80 p-4">
-                              <p className="text-[10px] font-bold uppercase tracking-widest text-amber-700 mb-2">Evidence Warnings</p>
-                              <div className="space-y-1">
-                                {result.weak_claims.map((claim, index) => (
-                                  <p key={`${claim}-${index}`} className="text-sm font-medium text-amber-900">{claim}</p>
-                                ))}
-                              </div>
-                            </Card>
-                          )}
-                          <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-300">Analysis Output</p>
-                          <div className="prose prose-slate max-w-none text-[15px] leading-[1.8] text-slate-800 font-medium border-l-4 border-slate-900 pl-8 transition-all hover:bg-slate-50/50 py-2 rounded-r-2xl
-                             prose-headings:text-slate-900 prose-headings:font-bold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
-                             prose-p:mb-4 prose-ul:list-disc prose-ul:pl-6 prose-li:mb-1
-                             prose-table:border prose-table:border-slate-200 prose-th:bg-slate-50 prose-th:p-2 prose-td:p-2 prose-td:border-t">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                a: ({ node, ...props }) => {
-                                  const isSource = props.href?.startsWith('#source-');
-                                  if (isSource && result) {
-                                    const index = parseInt(props.href!.split('-')[1]) - 1;
-                                    const source = result.sources[index];
-                                    if (source) {
-                                      const baseName = source.filename.split(/[/\\]/).pop() || source.filename;
-                                      const cleanName = baseName.replace(/\.pdf$/i, '');
-                                      const displayName = cleanName.length > 20 ? cleanName.substring(0, 17) + '...' : cleanName;
-                                      const sourceLabel = source.page ? `${displayName} (p. ${source.page})` : displayName;
-                                      return (
-                                        <TooltipProvider>
-                                          <Tooltip>
-                                            <TooltipTrigger asChild>
-                                              <span
-                                                onClick={() => setSelectedSource(source)}
-                                                className="inline-flex items-center gap-1 bg-slate-100 text-slate-900 px-2 py-0.5 rounded-md font-bold text-[10px] cursor-pointer hover:bg-slate-900 hover:text-white transition-colors mx-0.5"
-                                              >
-                                                <FileText className="w-2.5 h-2.5 shrink-0 text-slate-500" />
-                                                {sourceLabel}
-                                              </span>
-                                            </TooltipTrigger>
-                                            <TooltipContent className="bg-slate-900 text-white border-none p-3 rounded-xl shadow-2xl">
-                                              <div className="space-y-1">
-                                                <p className="text-[10px] font-bold truncate max-w-[200px]">{source.filename}</p>
-                                                <p className="text-[9px] text-slate-400 font-medium uppercase tracking-tighter">Verified Grounding | Page {source.page || 'N/A'}</p>
-                                              </div>
-                                            </TooltipContent>
-                                          </Tooltip>
-                                        </TooltipProvider>
-                                      );
-                                    }
-                                  }
-                                  return <a {...props} className="text-slate-900 underline decoration-slate-200 underline-offset-4 hover:decoration-slate-900 transition-all font-bold" />;
-                                },
-                                code: ({ node, className, children, ...props }) => {
-                                  const match = /language-(\w+)/.exec(className || '');
-                                  const lang = match ? match[1] : '';
-
-                                  if (lang === 'json') {
-                                    try {
-                                      const raw = String(children).trim();
-                                      const cleanJson = raw.replace(':chart', '').trim();
-                                      const config = JSON.parse(cleanJson);
-
-                                      if (config && typeof config === 'object' && config.type && Array.isArray(config.data)) {
-                                        return <DynamicChart config={config} />;
-                                      }
-                                    } catch (e) {
-                                      return <code className={className} {...props}>{children}</code>;
-                                    }
-                                  }
-
-                                  return <code className={className} {...props}>{children}</code>;
-                                },
-                                p: ({ node, ...props }) => <p {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</p>,
-                                td: ({ node, ...props }) => <td {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</td>,
-                                th: ({ node, ...props }) => <th {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</th>,
-                                li: ({ node, ...props }) => <li {...props}>{renderWithLineBreaksAndCitations(props.children, result?.sources || [], setSelectedSource)}</li>
-                              }}
-                            >
-                              {result.answer}
-                            </ReactMarkdown>
-                          </div>
-                        </div>
-
-                        <div className="space-y-6">
-                          <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-300">Cited Evidence Fragments</p>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {result.sources.map((src: Source, i: number) => (
-                              <Card
-                                key={i}
-                                onClick={() => setSelectedSource(src)}
-                                className={`p-5 rounded-2xl cursor-pointer transition-all border shadow-none hover:shadow-md
-                                    ${selectedSource === src ? 'border-slate-900 bg-white ring-1 ring-slate-900 translate-y-[-2px]' : 'border-slate-100 bg-slate-50/10 hover:border-slate-300 hover:bg-white'}`}
-                              >
-                                <div className="flex items-center justify-between mb-3">
-                                  <Badge variant="secondary" className="bg-slate-100 text-slate-500 rounded-lg px-2 h-5 text-[9px] hover:bg-slate-200 border-none">{`#${i + 1}`}</Badge>
-                                  <span className="text-[9px] font-bold text-slate-400">{(src.score * 100).toFixed(0)}% Match</span>
-                                </div>
-                                <p className="text-[11px] font-bold text-slate-900 truncate mb-2">{src.filename}</p>
-                                <div className="flex items-center gap-1.5 opacity-40">
-                                  <FileText className="w-3 h-3" />
-                                  <span className="text-[9px] font-bold uppercase tracking-tighter">Page {src.page || 'N/A'}</span>
-                                </div>
-                              </Card>
-                            ))}
-                          </div>
+                    {/* Pulse Loading Indicator */}
+                    {querying && (
+                      <div className="flex gap-4 p-6 bg-slate-50/50 border border-slate-100 rounded-3xl animate-in fade-in duration-300">
+                        <Loader2 className="w-5 h-5 text-[#0B4C8C] animate-spin shrink-0" />
+                        <div className="space-y-3 flex-1">
+                          <p className="text-xs font-bold uppercase tracking-wider text-[#0B4C8C]">Synthesizing Relational Intelligence...</p>
+                          <div className="h-2 bg-slate-200 rounded-full w-3/4" />
+                          <div className="h-2 bg-slate-200 rounded-full w-1/2" />
                         </div>
                       </div>
                     )}
+
+                    {/* Auto-scroll target */}
+                    <div ref={chatEndRef} />
                   </div>
                 </ScrollArea>
 
                 {/* Fixed Query Bar Area */}
                 <div className="absolute bottom-10 left-10 right-10 z-20">
-                  <div className="max-w-4xl mx-auto relative cursor-text group" onClick={() => document.getElementById('query-input')?.focus()}>
+                  <div className="w-full max-w-[1300px] mx-auto relative cursor-text group" onClick={() => document.getElementById('query-input')?.focus()}>
                     <div className="absolute inset-x-0 bottom-[-8px] h-full bg-slate-900/5 blur-2xl rounded-3xl" />
                     <div className="relative bg-white border border-slate-200 rounded-3xl p-1.5 flex gap-0 shadow-[0px_20px_50px_rgba(0,0,0,0.06)] group-hover:border-slate-400 transition-colors">
                       <Input
@@ -1191,12 +1613,39 @@ export default function App() {
                         onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleQuery() }}
                         className="flex-1 bg-transparent border-none shadow-none text-base p-6 h-14 placeholder:text-slate-300 text-slate-800 font-medium focus-visible:ring-0"
                       />
+                      <select
+                        value={voiceLanguage}
+                        onChange={(e) => setVoiceLanguage((e.target.value as 'en-IN' | 'hi-IN'))}
+                        className="h-14 bg-transparent border-none text-xs font-semibold text-slate-500 px-2 outline-none"
+                        aria-label="Voice language"
+                      >
+                        <option value="en-IN">EN</option>
+                        <option value="hi-IN">HI</option>
+                      </select>
+                      <select
+                        value={sttMode}
+                        onChange={(e) => setSttMode((e.target.value as 'live' | 'accurate'))}
+                        className="h-14 bg-transparent border-none text-xs font-semibold text-slate-500 px-2 outline-none"
+                        aria-label="STT mode"
+                      >
+                        <option value="accurate">Accurate</option>
+                        <option value="live">Live</option>
+                      </select>
+                      <Button
+                        onClick={isRecording ? handleStopRecording : handleStartRecording}
+                        disabled={querying || isTranscribing}
+                        variant="ghost"
+                        className={`w-12 h-14 rounded-2xl p-0 shrink-0 ${isRecording ? 'text-rose-600' : 'text-slate-600'}`}
+                        title={isRecording ? "Stop recording" : "Start voice input"}
+                      >
+                        {isRecording ? <Square className="w-4 h-4 fill-current" /> : <Mic className="w-5 h-5" />}
+                      </Button>
                       <Button
                         onClick={handleQuery}
-                        disabled={querying || !query.trim()}
+                        disabled={querying || isTranscribing || !query.trim()}
                         className="bg-slate-900 hover:bg-slate-800 text-white w-14 h-14 rounded-2xl flex items-center justify-center p-0 shrink-0 transition-transform active:scale-95"
                       >
-                        {querying ? <Loader2 className="w-6 h-6 animate-spin" /> : <Search className="w-6 h-6" />}
+                        {querying || isTranscribing ? <Loader2 className="w-6 h-6 animate-spin" /> : <Search className="w-6 h-6" />}
                       </Button>
                     </div>
                   </div>
@@ -1455,11 +1904,6 @@ export default function App() {
     </div>
   )
 }
-
-
-
-
-
 
 
 

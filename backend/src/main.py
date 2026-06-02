@@ -7,7 +7,7 @@ from src import models
 from src.core.config import get_settings
 from src.core.database import init_db
 from src.core.logger import logger
-from src.routers import analyses, documents, eligibility, logs, projects, query, reports, usr
+from src.routers import analyses, documents, eligibility, health, logs, projects, query, reports, review, usr, voice
 from src.services.storage import ensure_bucket_exists
 from src.services.vector_db import ensure_collection_exists
 
@@ -67,6 +67,9 @@ app.include_router(reports.router)
 app.include_router(logs.router)
 app.include_router(usr.router)
 app.include_router(eligibility.router)
+app.include_router(voice.router)
+app.include_router(review.router)
+app.include_router(health.router)
 
 
 @app.get("/", tags=["Health"])

@@ -60,6 +60,7 @@ interface UsrCitizen {
 }
 
 interface UsrFraudFlag {
+  id?: string
   name?: string
   name1?: string
   name2?: string
@@ -77,6 +78,18 @@ interface UsrFraudFlag {
   label?: string
   type?: string
   description?: string
+  latest_review?: {
+    action: string
+    note?: string | null
+    reviewed_by: string
+    reviewed_at: string
+  } | null
+}
+
+interface DependencyHealthResponse {
+  status: string
+  dependencies: Record<string, { status: string; detail?: string; checked_at?: string }>
+  checked_at?: string
 }
 
 interface UsrDataQuality {
@@ -107,6 +120,11 @@ interface UsrAuditCase {
   flag_notes: string[]
 }
 
+interface DistrictMauzaPair {
+  district: string
+  mauza: string
+}
+
 interface UsrRulesEF {
   rule_e: any[]
   rule_f: any[]
@@ -115,7 +133,7 @@ interface UsrRulesEF {
 
 
 export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
-  const INTEL_PAGE_SIZE = 500
+  const INTEL_PAGE_SIZE = 50
   const [usrStats, setUsrStats] = useState<UsrStats | null>(null)
   const [usrTopRisk, setUsrTopRisk] = useState<Record<string, UsrCitizen[]>>({
     all: [],
@@ -125,6 +143,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
   })
   const [usrHeatmap, setUsrHeatmap] = useState<UsrDistrict[]>([])
   const [usrLoading, setUsrLoading] = useState(false)
+  const [usrError, setUsrError] = useState<string | null>(null)
   const [usrGhosts, setUsrGhosts] = useState<UsrFraudFlag[]>([])
   const [usrDuplicates, setUsrDuplicates] = useState<UsrFraudFlag[]>([])
   const [usrIntelligenceFeed, setUsrIntelligenceFeed] = useState<any[]>([])
@@ -133,7 +152,31 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
   const [usrAnomalies, setUsrAnomalies] = useState<UsrFraudFlag[]>([])
   const [usrDataQuality, setUsrDataQuality] = useState<UsrDataQuality | null>(null)
   const [usrAuditQueue, setUsrAuditQueue] = useState<UsrAuditCase[]>([])
+  const [usrAuditQueueTotal, setUsrAuditQueueTotal] = useState(0)
   const [usrRulesEF, setUsrRulesEF] = useState<UsrRulesEF>({ rule_e: [], rule_f: [] })
+  const [dependencyHealth, setDependencyHealth] = useState<DependencyHealthResponse | null>(null)
+  const [healthLoading, setHealthLoading] = useState(false)
+  const [globalSchemeFilter, setGlobalSchemeFilter] = useState('ALL')
+  const [globalDistrictFilter, setGlobalDistrictFilter] = useState('ALL')
+  const [globalRiskFilter, setGlobalRiskFilter] = useState('ALL')
+  const [globalDateRange, setGlobalDateRange] = useState('ALL')
+  const [globalQuerySearch, setGlobalQuerySearch] = useState('')
+  const [intelSortBy, setIntelSortBy] = useState<'confidence' | 'detected_at'>('confidence')
+  const [intelSortDir, setIntelSortDir] = useState<'asc' | 'desc'>('desc')
+  const [intelPage, setIntelPage] = useState(1)
+  const [selectedIntelItem, setSelectedIntelItem] = useState<any | null>(null)
+  const [intelExplainOpen, setIntelExplainOpen] = useState(false)
+  const [reviewBusyId, setReviewBusyId] = useState<string | null>(null)
+  const [reviewNoteById, setReviewNoteById] = useState<Record<string, string>>({})
+  const [pdfRuleFilter, setPdfRuleFilter] = useState('ALL')
+  const [pdfDistrictFilter, setPdfDistrictFilter] = useState('ALL')
+  const [pdfMauzaFilter, setPdfMauzaFilter] = useState('ALL')
+  const [auditRuleOptions, setAuditRuleOptions] = useState<string[]>([])
+  const [auditDistrictOptions, setAuditDistrictOptions] = useState<string[]>([])
+  const [auditMauzaOptions, setAuditMauzaOptions] = useState<string[]>([])
+  const [districtMauzaPairs, setDistrictMauzaPairs] = useState<DistrictMauzaPair[]>([])
+  const [queueLoading, setQueueLoading] = useState(false)
+  const [pdfDownloading, setPdfDownloading] = useState(false)
   
   // New Functional States for Field Portal
   const [isQueueModalOpen, setIsQueueModalOpen] = useState(false)
@@ -174,15 +217,35 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     )
   }
 
+  const getErrorMessage = (err: any, fallback: string): string => {
+    const detail = err?.response?.data?.detail
+    if (typeof detail === 'string') return detail
+    if (detail?.message) return `${detail.message}${detail.action_hint ? ` (${detail.action_hint})` : ''}`
+    return fallback
+  }
+
+  const fetchDependencyHealth = async () => {
+    setHealthLoading(true)
+    try {
+      const res = await axios.get(`${API}/health/dependencies`)
+      setDependencyHealth(res.data as DependencyHealthResponse)
+    } catch (err) {
+      console.error('Dependency health load failed', err)
+    } finally {
+      setHealthLoading(false)
+    }
+  }
+
   const fetchUsrDashboard = async (force = false) => {
     if (usrRequestInFlightRef.current) return
     if (usrHasLoadedRef.current && !force) return
 
     usrRequestInFlightRef.current = true
     setUsrLoading(true)
+    setUsrError(null)
 
     try {
-      const [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes] = await Promise.all([
+      const [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes] = await Promise.allSettled([
         axios.get(`${API}/api/usr/stats`),
         axios.get(`${API}/api/usr/top-risk?limit=50`),
         axios.get(`${API}/api/usr/top-risk?limit=50&segment=elderly`),
@@ -191,28 +254,36 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
         axios.get(`${API}/api/usr/heatmap`),
       ])
 
-      setUsrStats(statsRes.data)
+      if (statsRes.status === 'fulfilled') {
+        setUsrStats(statsRes.value.data)
+      }
       setUsrTopRisk({
-        all: topRiskAll.data.citizens || [],
-        elderly: topRiskElderly.data.citizens || [],
-        children: topRiskChildren.data.citizens || [],
-        workers: topRiskWorkers.data.citizens || []
+        all: topRiskAll.status === 'fulfilled' ? (topRiskAll.value.data.citizens || []) : [],
+        elderly: topRiskElderly.status === 'fulfilled' ? (topRiskElderly.value.data.citizens || []) : [],
+        children: topRiskChildren.status === 'fulfilled' ? (topRiskChildren.value.data.citizens || []) : [],
+        workers: topRiskWorkers.status === 'fulfilled' ? (topRiskWorkers.value.data.citizens || []) : []
       })
-      setUsrHeatmap(heatmapRes.data.districts || [])
+      setUsrHeatmap(heatmapRes.status === 'fulfilled' ? (heatmapRes.value.data.districts || []) : [])
+
+      const coreFailures = [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes]
+        .filter((r) => r.status === 'rejected').length
+      if (coreFailures === 6) {
+        setUsrError('Failed to load Social Registry dashboard data.')
+        return
+      }
       usrHasLoadedRef.current = true
-    } catch (err) {
-      console.error('USR Dashboard core load failed', err)
-      return
     } finally {
       usrRequestInFlightRef.current = false
       setUsrLoading(false)
     }
 
-    const [intelRes, qualityRes, auditRes, rulesEFRes] = await Promise.allSettled([
+    const [intelRes, qualityRes, auditRes, rulesEFRes, auditRulesRes, intelligenceFiltersRes] = await Promise.allSettled([
       axios.get(`${API}/api/usr/intelligence/feed?limit=${INTEL_PAGE_SIZE}&offset=0`),
       axios.get(`${API}/api/usr/data-quality`),
       axios.get(`${API}/api/usr/audit-queue`),
       axios.get(`${API}/api/usr/analytics/rules-ef`),
+      axios.get(`${API}/api/usr/audit-rules`),
+      axios.get(`${API}/api/usr/intelligence/filters`),
     ])
 
     if (intelRes.status === 'fulfilled') {
@@ -228,15 +299,56 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
 
     if (auditRes.status === 'fulfilled') {
       setUsrAuditQueue(auditRes.value.data.queue || [])
+      setUsrAuditQueueTotal(auditRes.value.data.total || (auditRes.value.data.queue || []).length)
     }
 
     if (rulesEFRes.status === 'fulfilled') {
       setUsrRulesEF(rulesEFRes.value.data)
     }
+    if (auditRulesRes.status === 'fulfilled') {
+      setAuditRuleOptions((auditRulesRes.value.data?.rules || []).map((r: any) => String(r)))
+    }
+    if (intelligenceFiltersRes.status === 'fulfilled') {
+      setAuditDistrictOptions((intelligenceFiltersRes.value.data?.districts || []).map((d: any) => String(d)))
+      setAuditMauzaOptions((intelligenceFiltersRes.value.data?.mauzas || []).map((m: any) => String(m)))
+      setAuditRuleOptions((intelligenceFiltersRes.value.data?.rules || []).map((r: any) => String(r)))
+      setDistrictMauzaPairs(
+        (intelligenceFiltersRes.value.data?.district_mauza_pairs || [])
+          .map((pair: any) => ({
+            district: String(pair?.district || '').trim(),
+            mauza: String(pair?.mauza || '').trim(),
+          }))
+          .filter((pair: DistrictMauzaPair) => pair.district && pair.mauza)
+      )
+    }
+    await fetchDependencyHealth()
   }
   useEffect(() => {
     fetchUsrDashboard()
   }, [])
+
+  const submitReviewAction = async (item: UsrFraudFlag, action: string) => {
+    const decisionId = item.id
+    if (!decisionId) return
+    const note = (reviewNoteById[decisionId] || '').trim()
+    if ((action === 'REJECT' || action === 'ESCALATE') && !note) {
+      window.alert('Please add a note for Reject/Escalate.')
+      return
+    }
+    setReviewBusyId(decisionId)
+    try {
+      await axios.post(`${API}/api/review/decision/${decisionId}`, {
+        action,
+        note,
+        reviewer_id: 'field_officer',
+      })
+      await fetchUsrDashboard(true)
+    } catch (err: any) {
+      window.alert(getErrorMessage(err, 'Failed to submit review action.'))
+    } finally {
+      setReviewBusyId(null)
+    }
+  }
 
   const handleLoadMoreIntelligence = async () => {
     if (usrLoadingMoreIntel) return
@@ -244,7 +356,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     setUsrLoadingMoreIntel(true)
     try {
       const res = await axios.get(
-        `${API}/api/usr/intelligence/feed?limit=${INTEL_PAGE_SIZE}&offset=${usrIntelligenceFeed.length}`
+        `${API}/api/usr/intelligence/feed?limit=${INTEL_PAGE_SIZE}&offset=${usrIntelligenceFeed.length}&include_total=false`
       )
       const more = res.data.feed || []
       const total = res.data.total || usrIntelligenceTotal
@@ -343,14 +455,171 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
 
   const visibleCitizens = showAllCitizens ? filteredCitizens : filteredCitizens.slice(0, 10)
   const intelligenceFeedCount = usrIntelligenceFeed.length + usrRulesEF.rule_e.length + usrRulesEF.rule_f.length
+  const intelPageSize = 8
+
+  const schemeOptions = Array.from(
+    new Set(
+      usrIntelligenceFeed
+        .map((f: any) => String(f?.scheme || '').trim())
+        .filter((v: string) => Boolean(v) && v.toUpperCase() !== 'UNKNOWN' && v.toUpperCase() !== 'N/A')
+    )
+  ).sort()
+  const districtOptions = Array.from(
+    new Set(
+      usrIntelligenceFeed
+        .map((f: any) => String(f?.district || f?.gp_name || '').trim())
+        .filter((v: string) => Boolean(v) && v.toUpperCase() !== 'UNKNOWN' && v.toUpperCase() !== 'N/A')
+    )
+  ).sort()
+  const hasDetectedAtData = usrIntelligenceFeed.some((f: any) => Boolean(f?.detected_at))
+
+  const presetFilter = (preset: 'review' | 'high' | 'recent' | 'issues') => {
+    if (preset === 'review') {
+      setGlobalRiskFilter('REVIEW_PENDING')
+      setGlobalDateRange('ALL')
+    } else if (preset === 'high') {
+      setGlobalRiskFilter('HIGH')
+      setGlobalDateRange('ALL')
+    } else if (preset === 'recent') {
+      setGlobalDateRange('24H')
+    } else {
+      setGlobalRiskFilter('ALL')
+      setGlobalDateRange('7D')
+    }
+    setIntelPage(1)
+  }
+
+  const filteredIntelFeed = usrIntelligenceFeed
+    .filter((row: any) => {
+      if (globalSchemeFilter !== 'ALL' && String(row?.scheme || '') !== globalSchemeFilter) return false
+      if (globalDistrictFilter !== 'ALL' && String(row?.district || row?.gp_name || '') !== globalDistrictFilter) return false
+      if (globalRiskFilter === 'HIGH' && Number(row?.confidence || 0) < 85) return false
+      if (globalRiskFilter === 'REVIEW_PENDING' && row?.latest_review) return false
+      if (globalDateRange !== 'ALL') {
+        const detected = row?.detected_at ? new Date(row.detected_at).getTime() : 0
+        if (detected) {
+          const now = Date.now()
+          const diffHrs = (now - detected) / (1000 * 60 * 60)
+          if (globalDateRange === '24H' && diffHrs > 24) return false
+          if (globalDateRange === '7D' && diffHrs > 24 * 7) return false
+          if (globalDateRange === '30D' && diffHrs > 24 * 30) return false
+        }
+      }
+      if (globalQuerySearch.trim()) {
+        const q = globalQuerySearch.trim().toLowerCase()
+        const hay = `${row?.name || ''} ${row?.uid || ''} ${row?.rule || ''} ${row?.description || ''}`.toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      return true
+    })
+    .sort((a: any, b: any) => {
+      const dir = intelSortDir === 'asc' ? 1 : -1
+      if (intelSortBy === 'confidence') {
+        return (Number(a?.confidence || 0) - Number(b?.confidence || 0)) * dir
+      }
+      const ta = a?.detected_at ? new Date(a.detected_at).getTime() : 0
+      const tb = b?.detected_at ? new Date(b.detected_at).getTime() : 0
+      return (ta - tb) * dir
+    })
+
+  const totalIntelPages = Math.max(1, Math.ceil(filteredIntelFeed.length / intelPageSize))
+  const pagedIntelFeed = filteredIntelFeed.slice((intelPage - 1) * intelPageSize, intelPage * intelPageSize)
+  const pdfRuleOptions = (auditRuleOptions.length > 0 ? auditRuleOptions : Array.from(
+    new Set(
+      usrIntelligenceFeed
+        .map((f: any) => String(f?.rule || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
+  ).sort())
+  const pdfDistrictOptions = (auditDistrictOptions.length > 0 ? auditDistrictOptions : Array.from(
+    new Set(
+      usrHeatmap
+        .map((d) => String(d?.district || '').trim())
+        .filter(Boolean)
+    )
+  ).sort())
+  const pdfMauzaOptions = pdfDistrictFilter !== 'ALL'
+    ? Array.from(
+        new Set(
+          districtMauzaPairs
+            .filter((pair) => pair.district === pdfDistrictFilter)
+            .map((pair) => pair.mauza)
+            .filter(Boolean)
+        )
+      ).sort()
+    : (auditMauzaOptions.length > 0
+      ? auditMauzaOptions
+      : Array.from(new Set(usrAuditQueue.map((q) => String(q?.block || '').trim()).filter(Boolean))).sort())
 
   const handleAuditAll = () => {
     setIsQueueModalOpen(true)
   }
 
-  const handleDownloadPdf = () => {
-    window.open(`${API}/api/usr/audit-queue/export-pdf`, '_blank')
+  const fetchAuditQueueByRule = async (rule: string) => {
+    setQueueLoading(true)
+    setUsrAuditQueue([])
+    setUsrAuditQueueTotal(0)
+    try {
+      const params = new URLSearchParams()
+      if (rule !== 'ALL') params.set('rules', rule)
+      if (pdfDistrictFilter !== 'ALL') params.set('district', pdfDistrictFilter)
+      if (pdfMauzaFilter !== 'ALL') params.set('mauza', pdfMauzaFilter)
+      const query = params.toString()
+      const res = await axios.get(`${API}/api/usr/audit-queue${query ? `?${query}` : ''}`)
+      setUsrAuditQueue(res.data.queue || [])
+      setUsrAuditQueueTotal(res.data.total || (res.data.queue || []).length)
+    } catch (err) {
+      console.error('Audit queue filter load failed', err)
+      setUsrAuditQueue([])
+      setUsrAuditQueueTotal(0)
+    } finally {
+      setQueueLoading(false)
+    }
   }
+
+  useEffect(() => {
+    if (pdfMauzaFilter === 'ALL') return
+    if (!pdfMauzaOptions.includes(pdfMauzaFilter)) {
+      setPdfMauzaFilter('ALL')
+    }
+  }, [pdfDistrictFilter, pdfMauzaFilter, pdfMauzaOptions])
+
+  const handleDownloadPdf = async () => {
+    setPdfDownloading(true)
+    const params = new URLSearchParams()
+    if (pdfRuleFilter !== 'ALL') params.set('rules', pdfRuleFilter)
+    if (pdfDistrictFilter !== 'ALL') params.set('district', pdfDistrictFilter)
+    if (pdfMauzaFilter !== 'ALL') params.set('mauza', pdfMauzaFilter)
+    params.set('_ts', String(Date.now()))
+    const query = params.toString()
+    try {
+      const res = await axios.get(`${API}/api/usr/audit-queue/export-pdf${query ? `?${query}` : ''}`, {
+        responseType: 'blob',
+        timeout: 300000,
+      })
+      const blob = res.data instanceof Blob ? res.data : new Blob([res.data], { type: 'application/pdf' })
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `USR_Forensic_Field_Brief_${pdfRuleFilter}_${pdfDistrictFilter}_${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`
+      a.style.display = 'none'
+      document.body.appendChild(a)
+      a.click()
+      setTimeout(() => {
+        window.URL.revokeObjectURL(url)
+        document.body.removeChild(a)
+      }, 60000)
+    } catch (err: any) {
+      window.alert(getErrorMessage(err, 'Failed to download PDF. Please retry.'))
+    } finally {
+      setPdfDownloading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!isQueueModalOpen) return
+    fetchAuditQueueByRule(pdfRuleFilter)
+  }, [isQueueModalOpen, pdfRuleFilter, pdfDistrictFilter, pdfMauzaFilter])
 
   const handleDrillDown = (citizen: UsrAuditCase) => {
     setSelectedAuditCitizen(citizen)
@@ -419,7 +688,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
             </div>
             <div className="flex gap-3">
               <button onClick={() => setShowAuditModal(false)} className="flex-1 h-11 rounded-2xl border border-slate-200 text-sm font-bold text-slate-600 hover:bg-slate-50 transition-colors">Cancel</button>
-              <button onClick={handleExportAuditCSV} className="flex-1 h-11 rounded-2xl bg-slate-900 text-white text-sm font-bold hover:bg-slate-800 transition-colors flex items-center justify-center gap-2">
+              <button onClick={handleExportAuditCSV} className="flex-1 h-11 rounded-2xl bg-[#0B4C8C] text-white text-sm font-bold hover:bg-[#0B4C8C]/90 transition-colors flex items-center justify-center gap-2 shadow-md shadow-blue-900/10">
                 <Download className="w-4 h-4" /> Export CSV
               </button>
             </div>
@@ -528,35 +797,92 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
 
             <footer className="p-8 bg-slate-50 border-t border-slate-100 flex justify-between items-center shrink-0">
                <p className="text-xs text-slate-400 font-medium italic">Showing all records found in the Knowledge Graph for this entry agent.</p>
-               <Button onClick={() => setShowOperatorAudit(false)} className="bg-slate-900 text-white rounded-xl px-8 h-10 font-bold text-sm">Close Audit Workspace</Button>
+               <Button onClick={() => setShowOperatorAudit(false)} className="bg-[#0B4C8C] text-white rounded-xl px-8 h-10 font-bold text-sm hover:bg-[#0B4C8C]/90 shadow-lg shadow-blue-900/10">Close Audit Workspace</Button>
             </footer>
           </div>
         </div>
       )}
-      <div className="bg-[#fcfdfe] animate-in fade-in duration-1000 min-h-screen w-full m-0 p-0 flex flex-col">
+      <div className="bg-slate-50 animate-in fade-in duration-700 min-h-screen w-full m-0 p-0 flex flex-col">
         <ScrollArea className="flex-1 w-full m-0 p-0">
           <div className="w-full m-0 p-0">
             
             {/* --- Unified Command Header --- */}
-            <header className="flex items-center justify-between p-6 md:p-8 bg-white border-b border-slate-100 sticky top-0 z-30 shadow-sm shadow-slate-900/5">
+            <header className="flex items-center justify-between p-6 md:p-8 bg-white border-b border-slate-200 sticky top-0 z-30">
               <div className="flex items-center gap-6">
-                <h1 className="text-3xl font-black tracking-tight text-slate-900 m-0">
-                  Social Registry Intelligence Hub
+                <h1 className="text-2xl md:text-3xl font-black tracking-tight text-slate-900 m-0 font-sans">
+                  Social Registry Audit Workspace
                 </h1>
-                <Badge className="border-blue-200 bg-blue-50 text-blue-700 text-[10px] font-bold uppercase tracking-[0.2em] px-3 py-1">v4.0 Phase 4</Badge>
+                <Badge className="border-slate-300 bg-slate-100 text-slate-700 text-[10px] font-bold uppercase tracking-[0.2em] px-3 py-1">AUDIT MODE</Badge>
               </div>
               
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => fetchUsrDashboard(true)} disabled={usrLoading} className="rounded-xl font-bold text-xs h-9 border-slate-200">
+                <Button variant="outline" size="sm" onClick={() => fetchUsrDashboard(true)} disabled={usrLoading} className="rounded-xl font-bold text-xs h-9 border-slate-200 text-[#0B4C8C] hover:bg-slate-50">
                   {usrLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-2" /> : <TrendingUp className="w-3.5 h-3.5 mr-2" />}
                   Refresh Intel
                 </Button>
-                <Button onClick={() => runUsrBatch('sync')} size="sm" className="bg-slate-900 rounded-xl font-bold text-xs h-9 text-white hover:bg-slate-800">
+                <Button onClick={() => runUsrBatch('sync')} size="sm" className="bg-[#0B4C8C] rounded-xl font-bold text-xs h-9 text-white hover:bg-[#0B4C8C]/90 shadow-md shadow-blue-900/10">
                   <ShieldCheck className="w-3.5 h-3.5 mr-2" />
                   Field Audit Sync
                 </Button>
               </div>
             </header>
+
+            <div className="sticky top-[88px] z-20 border-b border-slate-200 bg-white px-6 md:px-8 py-4 space-y-3">
+              {usrError && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-xs font-semibold text-rose-700">
+                  {usrError}
+                </div>
+              )}
+              {dependencyHealth && dependencyHealth.status !== 'healthy' && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-800">
+                  Service health is degraded. Some feeds may be partial.
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge className={`${dependencyHealth?.status === 'healthy' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'} border text-[10px] font-bold`}>
+                  {healthLoading ? 'Checking Services...' : `Health: ${(dependencyHealth?.status || 'unknown').toUpperCase()}`}
+                </Badge>
+                <Badge className="bg-slate-100 text-slate-700 border-slate-300 border text-[10px] font-bold">
+                  Alerts: {filteredIntelFeed.length.toLocaleString()}
+                </Badge>
+                <Badge className="bg-slate-100 text-slate-700 border-slate-300 border text-[10px] font-bold">
+                  Queue: {usrAuditQueue.length.toLocaleString()}
+                </Badge>
+                <Button size="sm" variant={globalRiskFilter === 'REVIEW_PENDING' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('review')}>Needs Review</Button>
+                <Button size="sm" variant={globalRiskFilter === 'HIGH' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('high')}>High Risk</Button>
+                <Button size="sm" variant={globalDateRange === '24H' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('recent')}>Recently Re-judged</Button>
+                <Button size="sm" variant={globalDateRange === '7D' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('issues')}>Data Issues</Button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-2">
+                <select value={globalSchemeFilter} disabled={schemeOptions.length === 0} onChange={(e) => { setGlobalSchemeFilter(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+                  <option value="ALL">Scheme: All</option>
+                  {schemeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <select value={globalDistrictFilter} disabled={districtOptions.length === 0} onChange={(e) => { setGlobalDistrictFilter(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+                  <option value="ALL">District/GP: All</option>
+                  {districtOptions.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <select value={globalRiskFilter} onChange={(e) => { setGlobalRiskFilter(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold">
+                  <option value="ALL">Risk: All</option>
+                  <option value="HIGH">High Confidence</option>
+                  <option value="REVIEW_PENDING">Review Pending</option>
+                </select>
+                <select value={globalDateRange} disabled={!hasDetectedAtData} onChange={(e) => { setGlobalDateRange(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
+                  <option value="ALL">Date: All</option>
+                  <option value="24H">Last 24h</option>
+                  <option value="7D">Last 7d</option>
+                  <option value="30D">Last 30d</option>
+                </select>
+                <select value={intelSortBy} onChange={(e) => setIntelSortBy(e.target.value as 'confidence' | 'detected_at')} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold">
+                  <option value="confidence">Sort: Confidence</option>
+                  <option value="detected_at">Sort: Detected Time</option>
+                </select>
+                <input value={globalQuerySearch} onChange={(e) => { setGlobalQuerySearch(e.target.value); setIntelPage(1) }} placeholder="Search UID/Name/Rule" className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold" />
+              </div>
+              <p className="text-[10px] text-slate-500">
+                Filters apply to the Audit Intelligence Queue. Some filters auto-disable when source fields are unavailable.
+              </p>
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-6 md:p-8">
                {[
@@ -624,9 +950,9 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
 
             {/* --- Main Dashboard Content --- */}
             <div className="grid grid-cols-12 gap-8 px-6 md:px-8 pb-12">
-              
+
               {/* Left Column: Analytics & Mapping */}
-              <div className="col-span-12 lg:col-span-8 space-y-8">
+              <div className="col-span-12 lg:col-span-8 order-2 space-y-8">
                 
                 {/* District Risk Heatmap */}
                 <Card className="glass-panel p-8 border-none ring-1 ring-slate-100 overflow-hidden">
@@ -706,7 +1032,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                            key={seg}
                            onClick={() => setSegmentFilter(seg)}
                            variant={segmentFilter === seg ? 'default' : 'outline'}
-                           className={`h-8 px-4 text-[10px] font-bold uppercase tracking-widest rounded-lg ${segmentFilter === seg ? 'bg-slate-900' : 'border-slate-100 bg-slate-50'}`}
+                           className={`h-8 px-4 text-[10px] font-bold uppercase tracking-widest rounded-lg ${segmentFilter === seg ? 'bg-[#0B4C8C] hover:bg-[#0B4C8C]/90 text-white shadow-sm' : 'border-slate-100 bg-slate-50'}`}
                          >
                            {seg === 'workers' ? 'working age' : seg}
                          </Button>
@@ -795,23 +1121,23 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
               </div>
 
               {/* Right Column: Intelligence Feed & Data Quality */}
-              <div className="col-span-12 lg:col-span-4 space-y-8">
+              <div className="col-span-12 order-1 space-y-8">
                 
                 {/* Rules & Explainability Feed */}
-                <Card className="glass-panel p-0 border-none ring-1 ring-slate-100 overflow-hidden bg-slate-900">
+                <Card className="p-0 border border-slate-200 overflow-hidden bg-white">
                    <div className="p-8">
-                     <h3 className="text-base font-bold white flex items-center gap-2">
-                       Intelligence Feed
-                       <Settings className="w-4 h-4 text-slate-500 animate-spin-slow" />
+                     <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                       Audit Intelligence Queue
+                       <Settings className="w-4 h-4 text-slate-500" />
                      </h3>
-                     <p className="text-[11px] text-slate-400 font-medium mt-1">Real-time Anomaly Detections derived from the Identity Hub.</p>
+                     <p className="text-[11px] text-slate-500 font-medium mt-1">Review each alert with evidence, then approve, reject, or escalate with notes.</p>
                    </div>
 
-                    <ScrollArea className="h-[435px] border-t border-slate-800">
+                    <ScrollArea className="h-[435px] border-t border-slate-200">
                       <div className="p-6 space-y-4">
                         {/* Unified Knowledge Graph Intelligence Feed (A-I) */}
-                        {usrIntelligenceFeed.map((flag: any, i: number) => (
-                           <div key={`intel-${i}`} className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700/50 hover:bg-slate-800 transition-colors group">
+                        {pagedIntelFeed.map((flag: any, i: number) => (
+                           <div key={`intel-${i}`} className="p-4 rounded-xl bg-slate-50 border border-slate-200 hover:border-slate-300 transition-colors group">
                                <div className="flex items-start justify-between mb-3">
                                   <div className="flex items-center gap-2">
                                      {flag.type === 'GHOST' ? <Ghost className="w-3.5 h-3.5 text-rose-500" /> : <Copy className="w-3.5 h-3.5 text-orange-400" />}
@@ -819,27 +1145,44 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                                         {flag.label || `Rule ${flag.rule}`}
                                      </span>
                                   </div>
-                                  <Badge className="bg-slate-900 border-slate-700 text-slate-400 text-[8px] font-bold">{flag.confidence}% CONF</Badge>
+                                     <Badge className="bg-white border-slate-300 text-slate-700 text-[8px] font-bold">{flag.confidence}% CONF</Badge>
                                </div>
-                               <p className="text-xs font-bold text-white mb-2 leading-snug">{flag.name || 'Unknown Identity'}</p>
-                               <p className="text-[10px] text-slate-500 leading-relaxed font-medium">
-                                 Detected in <span className="text-slate-300">{flag.gp_name}</span>. {flag.description}
+                               <p className="text-xs font-bold text-slate-900 mb-2 leading-snug">{flag.name || 'Unknown Identity'}</p>
+                               <p className="text-[10px] text-slate-600 leading-relaxed font-medium">
+                                 Detected in <span className="text-slate-800">{flag.gp_name || 'Unknown GP'}</span>. {flag.description}
                                </p>
+                               <div className="mt-3 flex flex-wrap gap-1">
+                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-emerald-500 text-emerald-700 bg-emerald-50" disabled={reviewBusyId === flag.id} onClick={() => submitReviewAction(flag, 'APPROVE')}>Approve</Button>
+                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-rose-500 text-rose-700 bg-rose-50" disabled={reviewBusyId === flag.id} onClick={() => submitReviewAction(flag, 'REJECT')}>Reject</Button>
+                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-amber-500 text-amber-700 bg-amber-50" disabled={reviewBusyId === flag.id} onClick={() => submitReviewAction(flag, 'ESCALATE')}>Escalate</Button>
+                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-blue-500 text-blue-700 bg-blue-50" onClick={() => { setSelectedIntelItem(flag); setIntelExplainOpen(true) }}>Explain</Button>
+                               </div>
+                               <input
+                                 value={reviewNoteById[flag.id || ''] || ''}
+                                 onChange={(e) => setReviewNoteById((prev) => ({ ...prev, [flag.id || '']: e.target.value }))}
+                                 placeholder="Review note (required for reject/escalate)"
+                                 className="mt-2 h-7 w-full rounded-md border border-slate-300 bg-white px-2 text-[10px] text-slate-700 placeholder:text-slate-400"
+                               />
+                               {flag.latest_review && (
+                                 <p className="mt-2 text-[9px] text-slate-500 font-semibold">
+                                   Last review: {flag.latest_review.action} by {flag.latest_review.reviewed_by}
+                                 </p>
+                               )}
                            </div>
                         ))}
 
                         {/* Household Overload Rules (E) */}
                         {usrRulesEF.rule_e.slice(0, 5).map((caseData: any, i: number) => (
-                          <div key={`e-${i}`} className="p-4 rounded-2xl bg-indigo-900/30 border border-indigo-500/30 hover:bg-indigo-900/40 transition-colors group">
+                          <div key={`e-${i}`} className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 transition-colors group">
                             <div className="flex items-start justify-between mb-3">
                                <div className="flex items-center gap-2">
                                   <Users className="w-3.5 h-3.5 text-indigo-400" />
                                   <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400">Rule E1</span>
                                </div>
-                               <Badge className="bg-indigo-950 text-indigo-300 text-[8px] font-bold">95% CONF</Badge>
+                               <Badge className="bg-white border-indigo-300 text-indigo-700 text-[8px] font-bold">95% CONF</Badge>
                             </div>
-                            <p className="text-xs font-bold text-white mb-1">RC: {caseData.ration_card}</p>
-                            <p className="text-[10px] text-indigo-200/60 font-medium">Synthetic Household: {caseData.member_count} members linked to one card.</p>
+                            <p className="text-xs font-bold text-slate-900 mb-1">RC: {caseData.ration_card}</p>
+                            <p className="text-[10px] text-indigo-800 font-medium">Synthetic Household: {caseData.member_count} members linked to one card.</p>
                           </div>
                         ))}
 
@@ -848,39 +1191,57 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                           <div 
                             key={`f-${i}`} 
                             onClick={() => fetchOperatorAudit(caseData.operator_id)}
-                            className="p-4 rounded-2xl bg-rose-900/30 border border-rose-500/30 hover:bg-rose-900/40 transition-all cursor-pointer group active:scale-95"
+                            className="p-4 rounded-xl bg-rose-50 border border-rose-200 hover:border-rose-300 transition-all cursor-pointer group active:scale-95"
                           >
                             <div className="flex items-start justify-between mb-3">
                                <div className="flex items-center gap-2">
                                   <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
                                   <span className="text-[10px] font-black uppercase tracking-[0.2em] text-rose-400">Rule F1</span>
                                </div>
-                               <Badge className="bg-rose-950 text-rose-300 text-[8px] font-bold">90% CONF</Badge>
+                               <Badge className="bg-white border-rose-300 text-rose-700 text-[8px] font-bold">90% CONF</Badge>
                             </div>
-                            <p className="text-xs font-bold text-white mb-1">Operator: {caseData.operator_id}</p>
+                            <p className="text-xs font-bold text-slate-900 mb-1">Operator: {caseData.operator_id}</p>
                             <div className="flex items-center justify-between">
-                              <p className="text-[10px] text-rose-200/60 font-medium">{Math.round(caseData.fraud_rate * 100)}% Forensic Fraud Rate.</p>
+                              <p className="text-[10px] text-rose-700 font-medium">{Math.round(caseData.fraud_rate * 100)}% Forensic Fraud Rate.</p>
                               <span className="text-[9px] font-black text-rose-400 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Drill Down →</span>
                             </div>
                           </div>
                         ))}
 
                         {intelligenceFeedCount === 0 && (
-                          <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-800/40 px-4 py-8 text-center">
-                            <p className="text-[11px] font-semibold text-slate-200">No intelligence alerts available yet.</p>
-                            <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                              The feed fills after fraud-analysis endpoints return alerts from the graph. If you just opened the hub, give the heavier scans a few seconds to finish.
-                            </p>
-                          </div>
-                        )}
+                           <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center">
+                             <p className="text-[11px] font-semibold text-slate-700">No intelligence alerts available yet.</p>
+                             <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
+                               The feed fills after fraud-analysis endpoints return alerts from the graph. If you just opened the hub, give the heavier scans a few seconds to finish.
+                             </p>
+                           </div>
+                         )}
                       </div>
                     </ScrollArea>
                    
-                   <div className="p-6 bg-slate-800 text-white flex items-center justify-between">
-                     <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                       Showing {usrIntelligenceFeed.length.toLocaleString()} of {usrIntelligenceTotal.toLocaleString()} alerts
+                   <div className="p-6 bg-slate-100 flex items-center justify-between border-t border-slate-200">
+                     <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">
+                       Showing {filteredIntelFeed.length.toLocaleString()} filtered alerts
                      </span>
                      <div className="flex items-center gap-2">
+                       {intelPage > 1 && (
+                         <Button
+                           size="sm"
+                           onClick={() => setIntelPage((p) => Math.max(1, p - 1))}
+                           className="h-8 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase px-4 rounded-xl"
+                         >
+                           Prev
+                         </Button>
+                       )}
+                       {intelPage < totalIntelPages && (
+                         <Button
+                           size="sm"
+                           onClick={() => setIntelPage((p) => Math.min(totalIntelPages, p + 1))}
+                           className="h-8 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase px-4 rounded-xl"
+                         >
+                           Next
+                         </Button>
+                       )}
                        {usrIntelligenceFeed.length < usrIntelligenceTotal && (
                          <Button
                            size="sm"
@@ -898,49 +1259,34 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                    </div>
                 </Card>
 
-                {/* Audit Queue / Export Card */}
-                <Card className="glass-panel p-8 border-none ring-1 ring-slate-100 bg-gradient-to-br from-indigo-600 to-blue-700 text-white relative overflow-hidden">
-                   <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 blur-3xl rounded-full translate-x-1/2 -translate-y-1/2" />
-                   <h3 className="text-base font-bold mb-2 flex items-center gap-2">
-                     Field Audit Portal
-                     <Download className="w-4 h-4 text-white/60" />
-                   </h3>
-                   <div className="space-y-4 mb-6">
-                      <p className="text-[11px] text-indigo-100 font-medium leading-relaxed">
-                        Top {usrAuditQueue.length} cases pre-selected for physical verification based on concurrent fraud signals.
-                      </p>
-                      <div className="space-y-2">
-                         {usrAuditQueue.slice(0, 3).map((caseItem: UsrAuditCase, idx: number) => (
-                           <div key={idx} className="flex items-center justify-between bg-white/10 p-2.5 rounded-xl border border-white/10">
-                              <div className="flex flex-col">
-                                <span className="text-[10px] font-black">{caseItem.name}</span>
-                                <span className="text-[8px] text-indigo-200 uppercase">{caseItem.gp} | {caseItem.flags} Signals</span>
-                              </div>
-                              <Button 
-                                variant="ghost" 
-                                size="icon" 
-                                className="h-6 w-6 text-white hover:bg-white/20"
-                                onClick={() => handleDrillDown(caseItem)}
-                              >
-                                <ArrowRight className="w-3 h-3" />
-                              </Button>
-                           </div>
-                         ))}
-                      </div>
-                   </div>
-                    <Button 
-                      onClick={handleDownloadPdf}
-                      className="w-full bg-white text-indigo-700 font-black text-xs h-12 rounded-2xl hover:bg-indigo-50 shadow-lg"
-                    >
-                      Export Priority List (.PDF)
-                    </Button>
-                </Card>
-
               </div>
             </div>
           </div>
         </ScrollArea>
       </div>
+
+      <Dialog open={intelExplainOpen} onOpenChange={setIntelExplainOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-black text-slate-800">Why this decision?</DialogTitle>
+            <DialogDescription className="text-slate-500 font-medium">
+              Explainability snapshot for field verification.
+            </DialogDescription>
+          </DialogHeader>
+          {selectedIntelItem && (
+            <div className="space-y-3 text-sm">
+              <p><span className="font-semibold">Identity:</span> {selectedIntelItem.name || 'Unknown'} ({selectedIntelItem.uid || 'N/A'})</p>
+              <p><span className="font-semibold">Rule:</span> {selectedIntelItem.rule} - {selectedIntelItem.label}</p>
+              <p><span className="font-semibold">Confidence:</span> {selectedIntelItem.confidence}%</p>
+              <p><span className="font-semibold">Location:</span> {selectedIntelItem.gp_name || 'N/A'}</p>
+              <p><span className="font-semibold">Reason:</span> {selectedIntelItem.description || 'No description available.'}</p>
+              {selectedIntelItem.latest_review && (
+                <p><span className="font-semibold">Latest Review:</span> {selectedIntelItem.latest_review.action} by {selectedIntelItem.latest_review.reviewed_by}</p>
+              )}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* MODAL: Full Priority Queue */}
       <Dialog open={isQueueModalOpen} onOpenChange={setIsQueueModalOpen}>
@@ -948,12 +1294,29 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
           <DialogHeader>
             <DialogTitle className="text-2xl font-black text-slate-800 uppercase tracking-tight">Priority Audit Queue</DialogTitle>
             <DialogDescription className="text-slate-500 font-medium">
-              Segment Analysis: Top 50 citizens flagged for immediate field verification.
+              Segment Analysis: Citizens flagged for immediate field verification.
             </DialogDescription>
+            <p className="text-[11px] font-bold text-slate-600 mt-2">
+              Matching Citizens (Flagged): {usrAuditQueueTotal.toLocaleString()}
+            </p>
+            <p className="text-[10px] font-semibold text-slate-500 mt-1">
+              Total Alerts (All Types): {usrIntelligenceTotal.toLocaleString()}
+            </p>
           </DialogHeader>
           
           <div className="flex-1 min-h-0 mt-6 pr-2 overflow-y-auto">
+            {queueLoading ? (
+              <div className="py-16 flex items-center justify-center text-sm text-slate-500 font-semibold">
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                Loading queue for selected rule...
+              </div>
+            ) : (
             <div className="space-y-3 pr-2">
+              {usrAuditQueue.length === 0 && (
+                <div className="py-16 text-center text-sm text-slate-500 font-semibold border border-dashed border-slate-200 rounded-2xl">
+                  No citizens found for the selected rule.
+                </div>
+              )}
               {usrAuditQueue.map((item: UsrAuditCase, idx: number) => (
                 <div key={idx} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100 hover:border-blue-200 transition-all group">
                   <div className="flex gap-4 items-center">
@@ -972,7 +1335,6 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                       variant="ghost" 
                       className="h-8 w-8 rounded-full text-blue-600 hover:bg-blue-50"
                       onClick={() => {
-                        setIsQueueModalOpen(false)
                         handleDrillDown(item)
                       }}
                     >
@@ -982,12 +1344,56 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                 </div>
               ))}
             </div>
+            )}
           </div>
 
           <div className="mt-8 flex justify-end gap-3 pt-6 border-t border-slate-100">
+             <select
+               value={pdfDistrictFilter}
+               onChange={(e) => setPdfDistrictFilter(e.target.value)}
+               className="h-10 rounded-xl border border-slate-200 px-3 text-[10px] font-bold uppercase tracking-widest text-slate-700"
+             >
+               <option value="ALL">District: All</option>
+               {pdfDistrictOptions.map((district) => (
+                 <option key={district} value={district}>
+                   {district}
+                 </option>
+               ))}
+             </select>
+             <select
+               value={pdfMauzaFilter}
+               onChange={(e) => setPdfMauzaFilter(e.target.value)}
+               className="h-10 rounded-xl border border-slate-200 px-3 text-[10px] font-bold uppercase tracking-widest text-slate-700"
+             >
+               <option value="ALL">Mauza: All</option>
+               {pdfMauzaOptions.map((mauza) => (
+                 <option key={mauza} value={mauza}>
+                   {mauza}
+                 </option>
+               ))}
+             </select>
+             <select
+               value={pdfRuleFilter}
+               onChange={(e) => setPdfRuleFilter(e.target.value)}
+               className="h-10 rounded-xl border border-slate-200 px-3 text-[10px] font-bold uppercase tracking-widest text-slate-700"
+             >
+               <option value="ALL">Rule: All</option>
+               {pdfRuleOptions.map((rule) => (
+                 <option key={rule} value={rule}>
+                   Rule: {rule}
+                 </option>
+               ))}
+             </select>
              <Button variant="outline" onClick={() => setIsQueueModalOpen(false)} className="rounded-xl border-slate-200 text-slate-600 font-bold text-[10px] uppercase">Close</Button>
-             <Button onClick={handleDownloadPdf} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] uppercase rounded-xl px-6">
-                Download PDF Brief (.pdf)
+             <Button onClick={handleDownloadPdf} disabled={pdfDownloading} className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] uppercase rounded-xl px-6 disabled:opacity-60">
+                {pdfDownloading ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" />
+                    Preparing PDF...
+                  </>
+                ) : (
+                  'Download PDF Brief (.pdf)'
+                )}
              </Button>
           </div>
         </DialogContent>
@@ -1061,7 +1467,7 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
               <div className="mt-8 pt-6 border-t border-slate-100">
                 <Button 
                   onClick={() => setIsForensicModalOpen(false)}
-                  className="w-full bg-slate-900 hover:bg-slate-800 text-white font-black text-[10px] uppercase h-12 rounded-2xl tracking-widest"
+                  className="w-full bg-[#0B4C8C] hover:bg-[#0B4C8C]/90 text-white font-black text-[10px] uppercase h-12 rounded-2xl tracking-widest shadow-md shadow-blue-900/10"
                 >
                   Confirm Awareness & Close
                 </Button>

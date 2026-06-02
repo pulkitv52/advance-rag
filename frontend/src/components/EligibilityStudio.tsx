@@ -201,6 +201,12 @@ const describeCondition = (condition: CanonicalCondition): string => {
   return `${condition.field} ${condition.operator}${valuePart}`
 }
 
+const formatManualFieldLabel = (field: string): string =>
+  String(field || "")
+    .split("_")
+    .filter(Boolean)
+    .join(" ")
+
 
 
 const CONCEPT_TO_DB_FIELD_MAP: Record<string, string> = {
@@ -261,7 +267,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [uploadProgress, setUploadProgress] = useState(0)
   const [loadingDecisions, setLoadingDecisions] = useState(false)
   const [loadingManifest, setLoadingManifest] = useState(false)
-  const [showAllDecisions, setShowAllDecisions] = useState(false)
+  const [bucketFilter, setBucketFilter] = useState<string>("ALL")
 
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -377,20 +383,15 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
 
   // Stable refs for values that change but shouldn't cause callback recreation.
   const selectedRuleIdRef = useRef(selectedRuleId)
-  const showAllDecisionsRef = useRef(showAllDecisions)
   useEffect(() => { selectedRuleIdRef.current = selectedRuleId }, [selectedRuleId])
-  useEffect(() => { showAllDecisionsRef.current = showAllDecisions }, [showAllDecisions])
 
-  const loadDecisions = useCallback(async (ruleId?: string, silent = false, forceAll = false) => {
-    const includeAll = forceAll || showAllDecisionsRef.current
-    const targetRule = includeAll ? "" : (ruleId || selectedRuleIdRef.current)
-    if (!includeAll && !targetRule) return
+  const loadDecisions = useCallback(async (ruleId?: string, silent = false) => {
+    const targetRule = ruleId || selectedRuleIdRef.current
+    if (!targetRule) return
 
     if (!silent) setLoadingDecisions(true)
     try {
-      const url = targetRule
-        ? `${API}/api/eligibility/decisions?rule_id=${targetRule}&limit=200`
-        : `${API}/api/eligibility/decisions?limit=200`
+      const url = `${API}/api/eligibility/decisions?rule_id=${targetRule}&limit=200`
       const res = await axios.get(url)
       setDecisions((res.data?.decisions || []) as DecisionRow[])
     } catch (e: any) {
@@ -544,26 +545,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }
   }
 
-  const handleEvaluateAllRules = async () => {
-    setEvaluating(true)
-    setError(null)
-    setSuccess(null)
-    beginOperationProgress("Running eligibility evaluation for all active rules...")
-    try {
-      const lim = Math.max(1, Number.parseInt(runLimit || "500", 10) || 500)
-      const res = await axios.post(`${API}/api/eligibility/evaluate-all?limit=${lim}&scheme_only=true`)
-      const totalRules = Number(res.data?.total_rules || 0)
-      setSuccess(`Evaluation completed for ${totalRules} active rules.`)
-      setShowAllDecisions(true)
-      await loadDecisions(undefined, false, true)
-      completeOperationProgress("Evaluation for all rules completed.")
-    } catch (e: any) {
-      setError(e?.response?.data?.detail || "Evaluate-all failed")
-      completeOperationProgress("Evaluate-all failed.")
-    } finally {
-      setEvaluating(false)
-    }
-  }
 
   const parseManualInputValue = (
     raw: string,
@@ -579,6 +560,8 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     const upper = v.toUpperCase()
     if (["TRUE", "YES", "Y", "1"].includes(upper)) return true
     if (["FALSE", "NO", "N", "0"].includes(upper)) return false
+    if (["RETIRED", "TERMINATED", "INACTIVE"].includes(upper)) return true
+    if (["ACTIVE", "EMPLOYED", "WORKING"].includes(upper)) return false
     return v
   }
 
@@ -600,8 +583,13 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     try {
       const res = await axios.delete(`${API}/documents/${selectedDocumentId}`)
       await loadDocuments()
-      await loadRules(schemeId.trim() || undefined)
-      await loadDecisions(undefined, false, true)
+      const refreshedRules = await loadRules(schemeId.trim() || undefined)
+      const nextRuleId = refreshedRules[0]?.id
+      if (nextRuleId) {
+        await loadDecisions(nextRuleId)
+      } else {
+        setDecisions([])
+      }
       setSelectedDocumentId("")
       setSuccess(
         `${res.data?.message || "Document deleted."} Rules deleted: ${Number(res.data?.deleted_rule_count || 0)}`,
@@ -664,6 +652,11 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       ),
     [activeEditingRow],
   )
+
+  const filteredDecisions = useMemo(() => {
+    if (bucketFilter === "ALL") return decisions
+    return decisions.filter((row) => (row.decision_bucket || row.decision) === bucketFilter)
+  }, [decisions, bucketFilter])
 
   useEffect(() => {
     void loadDocuments()
@@ -776,10 +769,10 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
         <Card className="rounded-3xl border-slate-200 bg-white p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-bold uppercase tracking-[0.25em] text-slate-400">Eligibility Studio</p>
-              <h2 className="mt-1 text-2xl font-black text-slate-900">Policy Document to Eligibility Decision Engine</h2>
+              <p className="text-xs font-bold uppercase tracking-[0.25em] text-[#0B4C8C]">Smart Welfare Policy & Rule Engine (SPRE)</p>
+              <h2 className="mt-1 text-2xl font-black text-slate-900">Policy Scrutiny & Rule Digitization Dashboard</h2>
               <p className="mt-2 text-sm text-slate-600">
-                Select a policy document, extract eligibility metadata for a scheme, and evaluate citizens from dump data.
+                Select official policy documents to dynamically digitize welfare criteria and perform secure beneficiary eligibility scrutiny.
               </p>
             </div>
           </div>
@@ -1025,20 +1018,12 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
               <Button className="w-full rounded-xl" onClick={handleEvaluate} disabled={evaluating || !selectedRuleId}>
                 {evaluating ? "Running evaluation..." : "Run Inclusion/Exclusion Evaluation"}
               </Button>
-              <Button
-                variant="outline"
-                className="w-full rounded-xl"
-                onClick={handleEvaluateAllRules}
-                disabled={evaluating || rules.length === 0}
-              >
-                {evaluating ? "Running..." : "Run Evaluation For All Rules"}
-              </Button>
 
               <Button
                 variant="outline"
                 className="w-full rounded-xl"
                 onClick={() => loadDecisions(selectedRuleId)}
-                disabled={(!selectedRuleId && !showAllDecisions) || loadingDecisions}
+                disabled={!selectedRuleId || loadingDecisions}
               >
                 {loadingDecisions ? "Loading decisions..." : "Refresh Decisions"}
               </Button>
@@ -1050,14 +1035,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
               >
                 {loadingManifest ? "Loading manifest..." : "Refresh Rule Manifest"}
               </Button>
-              <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={showAllDecisions}
-                  onChange={(e) => setShowAllDecisions(e.target.checked)}
-                />
-                Show decisions from all schemes/rules
-              </label>
             </div>
           </Card>
 
@@ -1170,7 +1147,23 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Citizen Name</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Citizen Scheme</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Decision</th>
-                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Bucket</th>
+                  <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">
+                    <div className="flex flex-col gap-1">
+                      <span>Bucket</span>
+                      <select
+                        value={bucketFilter}
+                        onChange={(e) => setBucketFilter(e.target.value)}
+                        className="h-7 rounded-md border border-slate-200 bg-white px-2 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
+                      >
+                        <option value="ALL">All</option>
+                        {Object.entries(bucketLabel).map(([key, label]) => (
+                          <option key={key} value={key}>
+                            {label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Confidence</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Reason</th>
                   <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">LLM Checked Fields</th>
@@ -1179,7 +1172,7 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                 </tr>
               </thead>
               <tbody>
-                {decisions.map((row) => (
+                {filteredDecisions.map((row) => (
                   <tr key={row.id} className="border-b border-slate-50">
                     <td className="py-2 pr-3 text-sm font-medium text-slate-800">{row.citizen_uid}</td>
                     <td className="py-2 pr-3 text-sm text-slate-700">{row.citizen_name || "-"}</td>
@@ -1219,10 +1212,10 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                     </td>
                   </tr>
                 ))}
-                {decisions.length === 0 && (
+                {filteredDecisions.length === 0 && (
                   <tr>
                     <td colSpan={10} className="py-8 text-center text-sm font-medium text-slate-500">
-                      No decisions yet. Run an evaluation to populate this table.
+                      No decisions match the selected bucket filter.
                     </td>
                   </tr>
                 )}
@@ -1276,22 +1269,43 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                     {activeManualRequirements.map((req) => (
                       <div key={`${activeEditingRow.id}-${req.field}`} className="space-y-1">
                         <p className="text-[11px] font-semibold text-slate-600">
-                          {req.field} ({req.input_type})
+                          {formatManualFieldLabel(req.field)} ({req.input_type})
                         </p>
-                        <Input
-                          value={manualInputDrafts[activeEditingRow.id]?.[req.field] ?? ""}
-                          onChange={(e) =>
-                            setManualInputDrafts((prev) => ({
-                              ...prev,
-                              [activeEditingRow.id]: {
-                                ...(prev[activeEditingRow.id] || {}),
-                                [req.field]: e.target.value,
-                              },
-                            }))
-                          }
-                          placeholder={req.requirement || req.reason || req.field}
-                          className="h-9 rounded-md text-xs"
-                        />
+                        {req.input_type === "boolean" ? (
+                          <select
+                            value={manualInputDrafts[activeEditingRow.id]?.[req.field] ?? ""}
+                            onChange={(e) =>
+                              setManualInputDrafts((prev) => ({
+                                ...prev,
+                                [activeEditingRow.id]: {
+                                  ...(prev[activeEditingRow.id] || {}),
+                                  [req.field]: e.target.value,
+                                },
+                              }))
+                            }
+                            className="h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700"
+                          >
+                            <option value="">Select</option>
+                            <option value="true">Yes</option>
+                            <option value="false">No</option>
+                          </select>
+                        ) : (
+                          <Input
+                            type={req.input_type === "number" ? "number" : "text"}
+                            value={manualInputDrafts[activeEditingRow.id]?.[req.field] ?? ""}
+                            onChange={(e) =>
+                              setManualInputDrafts((prev) => ({
+                                ...prev,
+                                [activeEditingRow.id]: {
+                                  ...(prev[activeEditingRow.id] || {}),
+                                  [req.field]: e.target.value,
+                                },
+                              }))
+                            }
+                            placeholder={req.requirement || req.reason || req.field}
+                            className="h-9 rounded-md text-xs"
+                          />
+                        )}
                         {!!req.reason && <p className="text-[11px] text-slate-500">{req.reason}</p>}
                       </div>
                     ))}
@@ -1322,3 +1336,4 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     </div>
   )
 }
+

@@ -106,6 +106,9 @@ services:
       - NEO4J_PLUGINS=["apoc", "graph-data-science"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*,gds.*
       - NEO4J_dbms_security_procedures_allowlist=apoc.*,gds.*
+      - NEO4J_URI=
+      - NEO4J_USER=
+      - NEO4J_PASSWORD=
     volumes:
       - neo4j_data:/data
       - neo4j_plugins:/plugins
@@ -119,7 +122,7 @@ services:
     ports:
       - "${FRONTEND_PORT:-5181}:5173"
     environment:
-      - VITE_API_BASE_URL=http://127.0.0.1:8081
+      - VITE_API_BASE_URL=http://127.0.0.1:8082
     depends_on:
       - api
       - neo4j
