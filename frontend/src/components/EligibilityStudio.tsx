@@ -11,6 +11,74 @@ interface EligibilityStudioProps {
   API: string
 }
 
+interface FixedManifestListItem {
+  scheme_id: string
+  scheme_name: string
+  rule_name: string
+  manifest_version: string
+  path: string
+  include_condition_count: number
+  exclude_condition_count: number
+  renewal_condition_count: number
+}
+
+interface FixedManifestCondition {
+  condition_id: string
+  field: string
+  operator: string
+  value?: unknown
+  scope: string
+  mandatory?: boolean
+  policy_basis?: string
+}
+
+interface FixedManifest {
+  manifest_version: string
+  scheme_id: string
+  scheme_name: string
+  rule_name: string
+  evaluation_model?: {
+    eligibility_unit?: string
+    decision_granularity?: string
+    rule_logic?: string
+  }
+  include_conditions: FixedManifestCondition[]
+  exclude_conditions: FixedManifestCondition[]
+  renewal_conditions?: FixedManifestCondition[]
+  implementation_notes?: string[]
+}
+
+interface ManifestConditionMeta extends FixedManifestCondition {
+  condition_group: "include_conditions" | "exclude_conditions" | "renewal_conditions"
+}
+
+interface FixedManifestEvaluationSummary {
+  evaluation_run_id: string
+  scheme_id: string
+  artifact_path: string
+  evaluated: number
+  bucket_counts: Record<string, number>
+  mapping_status_counts: Record<string, number>
+  preview: Array<{
+    ration_card_memberid: string
+    fullname?: string | null
+    district_code?: number | null
+    decision_bucket: string
+    is_enrolled: boolean
+    is_eligible: boolean | null
+    passed_condition_ids: string[]
+    failed_condition_ids: string[]
+    unmapped_condition_ids: string[]
+  }>
+  evaluation_basis?: {
+    message?: string
+    district_code?: number | null
+    enrolled_only?: boolean
+    no_population_found?: boolean
+    no_population_reason?: string | null
+  }
+}
+
 interface DocumentRow {
   id: string
   filename: string
@@ -207,6 +275,31 @@ const formatManualFieldLabel = (field: string): string =>
     .filter(Boolean)
     .join(" ")
 
+const humanizeConditionField = (field: string): string =>
+  formatManualFieldLabel(field)
+    .replace(/\bwbhs\b/gi, "WBHS")
+    .replace(/\bcghs\b/gi, "CGHS")
+    .replace(/\besi\b/gi, "ESI")
+    .replace(/\bsqm\b/gi, "sqm")
+    .replace(/\bpg\b/gi, "PG")
+    .replace(/\buid\b/gi, "UID")
+    .replace(/\bc501\b/gi, "C501")
+    .replace(/\bs767\b/gi, "S767")
+    .replace(/\bs760\b/gi, "S760")
+
+const conditionGroupLabel: Record<ManifestConditionMeta["condition_group"], string> = {
+  include_conditions: "Include rule",
+  exclude_conditions: "Exclude rule",
+  renewal_conditions: "Renewal rule",
+}
+
+const mappingStatusLabel: Record<string, string> = {
+  direct_mapped: "Directly available in registry",
+  derived_mapped: "Derived from current registry",
+  family_derived: "Derived using family grouping",
+  unmapped: "Needs more data",
+}
+
 
 
 const CONCEPT_TO_DB_FIELD_MAP: Record<string, string> = {
@@ -255,6 +348,12 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   const [documents, setDocuments] = useState<DocumentRow[]>([])
   const [rules, setRules] = useState<RuleRow[]>([])
   const [decisions, setDecisions] = useState<DecisionRow[]>([])
+  const [fixedManifests, setFixedManifests] = useState<FixedManifestListItem[]>([])
+  const [selectedManifestSchemeId, setSelectedManifestSchemeId] = useState("")
+  const [activeManifest, setActiveManifest] = useState<FixedManifest | null>(null)
+  const [manifestDistrictCode, setManifestDistrictCode] = useState("")
+  const [manifestEnrolledOnly, setManifestEnrolledOnly] = useState(false)
+  const [manifestEvaluationSummary, setManifestEvaluationSummary] = useState<FixedManifestEvaluationSummary | null>(null)
 
   const [selectedDocumentId, setSelectedDocumentId] = useState("")
   const [schemeId, setSchemeId] = useState("")
@@ -263,10 +362,9 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
 
   const [extracting, setExtracting] = useState(false)
   const [evaluating, setEvaluating] = useState(false)
+  const [evaluatingManifest, setEvaluatingManifest] = useState(false)
   const [uploadingPolicy, setUploadingPolicy] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
-  const [loadingDecisions, setLoadingDecisions] = useState(false)
-  const [loadingManifest, setLoadingManifest] = useState(false)
   const [bucketFilter, setBucketFilter] = useState<string>("ALL")
 
   const [error, setError] = useState<string | null>(null)
@@ -314,6 +412,33 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }
     return Array.from(byScheme.values())
   }, [rules])
+
+  const manifestConditionMetaById = useMemo(() => {
+    const entries: Array<[string, ManifestConditionMeta]> = []
+    if (!activeManifest) return new Map<string, ManifestConditionMeta>()
+
+    for (const condition of activeManifest.include_conditions || []) {
+      entries.push([condition.condition_id, { ...condition, condition_group: "include_conditions" }])
+    }
+    for (const condition of activeManifest.exclude_conditions || []) {
+      entries.push([condition.condition_id, { ...condition, condition_group: "exclude_conditions" }])
+    }
+    for (const condition of activeManifest.renewal_conditions || []) {
+      entries.push([condition.condition_id, { ...condition, condition_group: "renewal_conditions" }])
+    }
+
+    return new Map<string, ManifestConditionMeta>(entries)
+  }, [activeManifest])
+
+  const previewUnresolvedConditionIds = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const row of manifestEvaluationSummary?.preview || []) {
+      for (const id of row.unmapped_condition_ids || []) {
+        counts.set(id, (counts.get(id) || 0) + 1)
+      }
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])
+  }, [manifestEvaluationSummary])
 
   const beginOperationProgress = (label: string) => {
     if (progressTimerRef.current) {
@@ -381,23 +506,48 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }
   }, [API, selectedRuleId])
 
+  const loadFixedManifests = useCallback(async () => {
+    try {
+      const res = await axios.get(`${API}/api/eligibility/fixed-manifests`)
+      const rows = (res.data?.manifests || []) as FixedManifestListItem[]
+      setFixedManifests(rows)
+      if (!selectedManifestSchemeId && rows.length > 0) {
+        setSelectedManifestSchemeId(rows[0].scheme_id)
+      }
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Failed to load fixed manifests")
+    }
+  }, [API, selectedManifestSchemeId])
+
+  const loadFixedManifest = useCallback(async (schemeIdValue?: string) => {
+    const target = schemeIdValue || selectedManifestSchemeId
+    if (!target) {
+      setActiveManifest(null)
+      return
+    }
+    try {
+      const res = await axios.get(`${API}/api/eligibility/fixed-manifests/${target}`)
+      setActiveManifest((res.data || null) as FixedManifest | null)
+    } catch (e: any) {
+      setActiveManifest(null)
+      setError(e?.response?.data?.detail || "Failed to load fixed manifest")
+    }
+  }, [API, selectedManifestSchemeId])
+
   // Stable refs for values that change but shouldn't cause callback recreation.
   const selectedRuleIdRef = useRef(selectedRuleId)
   useEffect(() => { selectedRuleIdRef.current = selectedRuleId }, [selectedRuleId])
 
-  const loadDecisions = useCallback(async (ruleId?: string, silent = false) => {
+  const loadDecisions = useCallback(async (ruleId?: string, _silent = false) => {
     const targetRule = ruleId || selectedRuleIdRef.current
     if (!targetRule) return
 
-    if (!silent) setLoadingDecisions(true)
     try {
       const url = `${API}/api/eligibility/decisions?rule_id=${targetRule}&limit=200`
       const res = await axios.get(url)
       setDecisions((res.data?.decisions || []) as DecisionRow[])
     } catch (e: any) {
       setError(e?.response?.data?.detail || "Failed to load decisions")
-    } finally {
-      if (!silent) setLoadingDecisions(false)
     }
   }, [API])
 
@@ -407,15 +557,12 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
       setRuleManifest(null)
       return
     }
-    if (!silent) setLoadingManifest(true)
     try {
       const res = await axios.get(`${API}/api/eligibility/rules/${targetRule}/manifest`)
       setRuleManifest((res.data || null) as RuleManifest | null)
     } catch (e: any) {
       setRuleManifest(null)
       if (!silent) setError(e?.response?.data?.detail || "Failed to load rule manifest")
-    } finally {
-      if (!silent) setLoadingManifest(false)
     }
   }, [API])
 
@@ -545,6 +692,45 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }
   }
 
+  const handleManifestEvaluate = async () => {
+    if (!selectedManifestSchemeId) {
+      setError("Select a fixed manifest first.")
+      return
+    }
+
+    setEvaluatingManifest(true)
+    setError(null)
+    setSuccess(null)
+    beginOperationProgress("Running registry evaluation from fixed manifest...")
+
+    try {
+      const lim = Math.max(1, Number.parseInt(runLimit || "500", 10) || 500)
+      const districtNum =
+        manifestDistrictCode.trim().length > 0
+          ? Number.parseInt(manifestDistrictCode.trim(), 10)
+          : null
+      advanceOperationProgress(`Evaluating ${lim.toLocaleString()} registry subjects...`, 30)
+      const res = await axios.post(
+        `${API}/api/eligibility/fixed-manifests/${selectedManifestSchemeId}/evaluate`,
+        {
+          limit: lim,
+          offset: 0,
+          district_code: Number.isNaN(districtNum as number) ? null : districtNum,
+          enrolled_only: manifestEnrolledOnly,
+        },
+      )
+      advanceOperationProgress("Saving evaluated artifact and preparing summary...", 82)
+      setManifestEvaluationSummary(res.data as FixedManifestEvaluationSummary)
+      setSuccess(`Manifest evaluation completed. Artifact: ${res.data?.artifact_path}`)
+      completeOperationProgress("Manifest evaluation completed successfully.")
+    } catch (e: any) {
+      setError(e?.response?.data?.detail || "Manifest evaluation failed")
+      completeOperationProgress("Manifest evaluation failed.")
+    } finally {
+      setEvaluatingManifest(false)
+    }
+  }
+
 
   const parseManualInputValue = (
     raw: string,
@@ -661,12 +847,21 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
   useEffect(() => {
     void loadDocuments()
     void loadRules()
+    void loadFixedManifests()
     return () => {
       if (progressTimerRef.current) {
         window.clearInterval(progressTimerRef.current)
       }
     }
-  }, [loadDocuments, loadRules])
+  }, [loadDocuments, loadRules, loadFixedManifests])
+
+  useEffect(() => {
+    if (!selectedManifestSchemeId) {
+      setActiveManifest(null)
+      return
+    }
+    void loadFixedManifest(selectedManifestSchemeId)
+  }, [selectedManifestSchemeId, loadFixedManifest])
 
   useEffect(() => {
     if (!selectedDocumentId) return
@@ -763,8 +958,45 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
     }
   }, [documents, trackedUploadDocId, loadRules, schemeId])
 
+  const renderConditionTokens = (
+    conditionIds: string[],
+    tone: "pass" | "fail" | "unresolved" = "unresolved",
+  ) => {
+    if (!conditionIds.length) {
+      return <span className="text-slate-400">-</span>
+    }
+
+    const toneClass =
+      tone === "pass"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+        : tone === "fail"
+          ? "border-rose-200 bg-rose-50 text-rose-800"
+          : "border-amber-200 bg-amber-50 text-amber-800"
+
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {conditionIds.map((id) => {
+          const meta = manifestConditionMetaById.get(id)
+          const label = meta ? humanizeConditionField(meta.field) : id
+          const title = meta
+            ? `${conditionGroupLabel[meta.condition_group]}: ${meta.policy_basis || label}`
+            : id
+          return (
+            <span
+              key={id}
+              title={title}
+              className={`inline-flex rounded-md border px-2.5 py-1 text-[11px] font-semibold leading-tight ${toneClass}`}
+            >
+              {label}
+            </span>
+          )
+        })}
+      </div>
+    )
+  }
+
   return (
-    <div className="h-full overflow-auto bg-slate-50/40 p-8">
+    <div className="h-full overflow-auto bg-transparent p-8">
       <div className="mx-auto max-w-7xl space-y-6">
         <Card className="rounded-3xl border-slate-200 bg-white p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -798,6 +1030,233 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
             </div>
           </Card>
         )}
+
+        <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+          <Card className="rounded-3xl border-slate-200 bg-white p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#0B4C8C]">Manifest-First Evaluation</p>
+                <h3 className="mt-1 text-xl font-black text-slate-900">Fixed Scheme Policy to Registry Evaluation</h3>
+                <p className="mt-2 text-sm text-slate-600">
+                  Choose a fixed scheme manifest, evaluate it against the normalized registry, and generate a runtime JSON artifact with mapping status, condition findings, and quadrant outcomes.
+                </p>
+              </div>
+              <Badge className="bg-slate-100 text-slate-700">{fixedManifests.length} manifests</Badge>
+            </div>
+
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <div className="space-y-3">
+                <div>
+                  <p className="mb-1 text-xs font-semibold text-slate-500">Fixed Manifest</p>
+                  <select
+                    value={selectedManifestSchemeId}
+                    onChange={(e) => setSelectedManifestSchemeId(e.target.value)}
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 outline-none"
+                  >
+                    <option value="">Select fixed manifest</option>
+                    {fixedManifests.map((item) => (
+                      <option key={item.scheme_id} value={item.scheme_id}>
+                        {item.scheme_id} | {item.scheme_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <p className="mb-1 text-xs font-semibold text-slate-500">District Code (optional)</p>
+                    <Input
+                      value={manifestDistrictCode}
+                      onChange={(e) => setManifestDistrictCode(e.target.value)}
+                      placeholder="e.g. 303"
+                      className="rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <p className="mb-1 text-xs font-semibold text-slate-500">Run Limit</p>
+                    <Input value={runLimit} onChange={(e) => setRunLimit(e.target.value)} placeholder="500" className="rounded-xl" />
+                  </div>
+                </div>
+
+                <label className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={manifestEnrolledOnly}
+                    onChange={(e) => setManifestEnrolledOnly(e.target.checked)}
+                    className="h-4 w-4 rounded border-slate-300"
+                  />
+                  <span className="text-sm font-medium text-slate-700">Evaluate only currently enrolled citizens for the selected scheme</span>
+                </label>
+
+                <Button
+                  className="w-full rounded-xl"
+                  onClick={handleManifestEvaluate}
+                  disabled={evaluatingManifest || !selectedManifestSchemeId}
+                >
+                  {evaluatingManifest ? "Generating evaluated artifact..." : "Evaluate Fixed Manifest Against Registry"}
+                </Button>
+
+                {manifestEvaluationSummary?.artifact_path && (
+                  <Card className="rounded-2xl border-emerald-200 bg-emerald-50 px-3 py-2">
+                    <p className="text-xs font-semibold text-emerald-700">
+                      Evaluated JSON created at <span className="font-mono">{manifestEvaluationSummary.artifact_path}</span>
+                    </p>
+                  </Card>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                {!activeManifest ? (
+                  <p className="text-sm text-slate-500">Select a fixed manifest to inspect its policy conditions.</p>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge className="bg-slate-900 text-white">{activeManifest.scheme_id}</Badge>
+                      <Badge className="bg-slate-100 text-slate-700">{activeManifest.scheme_name}</Badge>
+                      <Badge className="bg-slate-100 text-slate-700">v{activeManifest.manifest_version}</Badge>
+                    </div>
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Policy Summary</p>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                        <div className="rounded-xl bg-white px-3 py-2">
+                          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Include</p>
+                          <p className="text-lg font-black text-slate-900">{activeManifest.include_conditions.length}</p>
+                        </div>
+                        <div className="rounded-xl bg-white px-3 py-2">
+                          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Exclude</p>
+                          <p className="text-lg font-black text-slate-900">{activeManifest.exclude_conditions.length}</p>
+                        </div>
+                        <div className="rounded-xl bg-white px-3 py-2">
+                          <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Renewal</p>
+                          <p className="text-lg font-black text-slate-900">{activeManifest.renewal_conditions?.length || 0}</p>
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="mb-1 text-xs font-bold uppercase tracking-widest text-slate-400">Fixed Manifest JSON</p>
+                      <pre className="max-h-72 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-slate-100">{JSON.stringify(activeManifest, null, 2)}</pre>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </Card>
+
+          <Card className="rounded-3xl border-slate-200 bg-white p-6">
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Manifest Evaluation Summary</p>
+            {!manifestEvaluationSummary ? (
+              <p className="mt-3 text-sm text-slate-500">Run a fixed manifest evaluation to see quadrant counts, mapping-status coverage, and sample citizen findings.</p>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  {Object.entries(manifestEvaluationSummary.bucket_counts || {}).map(([key, value]) => (
+                    <Card key={key} className="rounded-2xl border-slate-100 bg-slate-50 px-3 py-2">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">{bucketLabel[key] || key}</p>
+                      <p className="text-lg font-black text-slate-900">{value}</p>
+                    </Card>
+                  ))}
+                </div>
+
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">Mapping Status Coverage</p>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {Object.entries(manifestEvaluationSummary.mapping_status_counts || {}).map(([key, value]) => (
+                      <div key={key} className="rounded-xl bg-white px-3 py-2">
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400">{key}</p>
+                        <p className="mt-0.5 text-[11px] text-slate-500">{mappingStatusLabel[key] || key}</p>
+                        <p className="text-base font-black text-slate-900">{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {!!previewUnresolvedConditionIds.length && (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                    <p className="text-[11px] font-bold uppercase tracking-widest text-amber-700">Why Records Stay Under Review</p>
+                    <div className="mt-2 space-y-2">
+                      {previewUnresolvedConditionIds.slice(0, 6).map(([id, count]) => {
+                        const meta = manifestConditionMetaById.get(id)
+                        const fieldLabel = meta ? humanizeConditionField(meta.field) : id
+                        return (
+                          <div key={id} className="rounded-xl bg-white px-3 py-2">
+                            <p className="text-sm font-semibold text-slate-900">{fieldLabel}</p>
+                            <p className="text-[11px] text-slate-600">
+                              {meta?.policy_basis || "Rule explanation not available in manifest."}
+                            </p>
+                            <p className="mt-1 text-[11px] font-medium text-amber-700">
+                              Appears unresolved in {count} preview row{count > 1 ? "s" : ""}.
+                            </p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <Card className="rounded-2xl border-sky-200 bg-sky-50 px-3 py-2">
+                  <p className="text-xs font-semibold text-sky-700">
+                    {manifestEvaluationSummary.evaluation_basis?.message || "Manifest evaluation completed."}
+                  </p>
+                  {!!manifestEvaluationSummary.evaluation_basis?.district_code && (
+                    <p className="mt-1 text-[11px] text-sky-700">District filter: {manifestEvaluationSummary.evaluation_basis.district_code}</p>
+                  )}
+                  <p className="mt-1 text-[11px] text-sky-700">
+                    Scope: {manifestEvaluationSummary.evaluation_basis?.enrolled_only ? "Only enrolled citizens" : "All registry citizens in scope"}
+                  </p>
+                  {!!manifestEvaluationSummary.evaluation_basis?.no_population_found && (
+                    <p className="mt-1 text-[11px] font-semibold text-rose-700">
+                      {manifestEvaluationSummary.evaluation_basis?.no_population_reason || "No evaluation population found."}
+                    </p>
+                  )}
+                </Card>
+              </div>
+            )}
+          </Card>
+        </div>
+
+        {manifestEvaluationSummary?.preview?.length ? (
+          <Card className="rounded-3xl border-slate-200 bg-white p-6">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-slate-400">Sample Evaluated Citizens</p>
+                <p className="mt-1 text-sm text-slate-600">Preview rows from the generated evaluated JSON artifact, with readable rule labels instead of raw condition IDs.</p>
+              </div>
+              <Badge className="bg-slate-100 text-slate-700">{manifestEvaluationSummary.preview.length} rows</Badge>
+            </div>
+            <div className="mt-4 overflow-auto">
+              <table className="w-full min-w-[1160px] text-left">
+                <thead>
+                  <tr className="border-b border-slate-100">
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Member ID</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Citizen</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">District</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Quadrant</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Enrolled</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Eligible</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Passed Rules</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Failed Rules</th>
+                    <th className="py-2 pr-3 text-[11px] font-bold uppercase tracking-widest text-slate-400">Needs More Data</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {manifestEvaluationSummary.preview.map((row) => (
+                    <tr key={row.ration_card_memberid} className="border-b border-slate-50 align-top">
+                      <td className="py-2 pr-3 text-sm font-medium text-slate-800">{row.ration_card_memberid}</td>
+                      <td className="py-2 pr-3 text-sm text-slate-700">{row.fullname || "-"}</td>
+                      <td className="py-2 pr-3 text-sm text-slate-700">{row.district_code ?? "-"}</td>
+                      <td className="py-2 pr-3 text-sm text-slate-700">{bucketLabel[row.decision_bucket] || row.decision_bucket}</td>
+                      <td className="py-2 pr-3 text-sm text-slate-700">{row.is_enrolled ? "Yes" : "No"}</td>
+                      <td className="py-2 pr-3 text-sm text-slate-700">{row.is_eligible === null ? "Review" : row.is_eligible ? "Yes" : "No"}</td>
+                      <td className="py-2 pr-3 text-xs text-slate-600">{renderConditionTokens(row.passed_condition_ids, "pass")}</td>
+                      <td className="py-2 pr-3 text-xs text-slate-600">{renderConditionTokens(row.failed_condition_ids, "fail")}</td>
+                      <td className="py-2 pr-3 text-xs text-slate-600">{renderConditionTokens(row.unmapped_condition_ids, "unresolved")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        ) : null}
 
         <div className="grid gap-6 lg:grid-cols-2">
           <Card className="rounded-3xl border-slate-200 bg-white p-6">
@@ -1018,23 +1477,6 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
               <Button className="w-full rounded-xl" onClick={handleEvaluate} disabled={evaluating || !selectedRuleId}>
                 {evaluating ? "Running evaluation..." : "Run Inclusion/Exclusion Evaluation"}
               </Button>
-
-              <Button
-                variant="outline"
-                className="w-full rounded-xl"
-                onClick={() => loadDecisions(selectedRuleId)}
-                disabled={!selectedRuleId || loadingDecisions}
-              >
-                {loadingDecisions ? "Loading decisions..." : "Refresh Decisions"}
-              </Button>
-              <Button
-                variant="outline"
-                className="w-full rounded-xl"
-                onClick={() => loadRuleManifest(selectedRuleId)}
-                disabled={!selectedRuleId || loadingManifest}
-              >
-                {loadingManifest ? "Loading manifest..." : "Refresh Rule Manifest"}
-              </Button>
             </div>
           </Card>
 
@@ -1044,19 +1486,21 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
               <div className="mt-4 space-y-3 text-sm">
                 <p className="font-semibold text-slate-800">Evaluated: {latestSummary.evaluated}</p>
                 <p className="font-semibold text-slate-800">Decisions Saved: {latestSummary.decisions_saved}</p>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                   {Object.entries(
                     (latestSummary.bucket_counts && Object.keys(latestSummary.bucket_counts).length > 0)
                       ? latestSummary.bucket_counts
                       : latestSummary.counts || {},
-                  ).map(([key, value]) => (
-                    <Card key={key} className="rounded-2xl border-slate-100 bg-slate-50 px-3 py-2">
-                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
-                        {bucketLabel[key] || key}
-                      </p>
-                      <p className="text-lg font-black text-slate-900">{value}</p>
-                    </Card>
-                  ))}
+                  )
+                    .filter(([key]) => key !== "ELIGIBLE_NOT_ENROLLED" && key !== "NOT_ELIGIBLE_NOT_ENROLLED")
+                    .map(([key, value]) => (
+                      <Card key={key} className="rounded-2xl border-slate-100 bg-slate-50 px-3 py-2">
+                        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+                          {bucketLabel[key] || key}
+                        </p>
+                        <p className="text-lg font-black text-slate-900">{value}</p>
+                      </Card>
+                    ))}
                 </div>
                 <Card className="rounded-2xl border-sky-200 bg-sky-50 px-3 py-2">
                   <p className="text-xs font-semibold text-sky-700">
@@ -1156,11 +1600,13 @@ export function EligibilityStudio({ API }: EligibilityStudioProps) {
                         className="h-7 rounded-md border border-slate-200 bg-white px-2 text-[10px] font-semibold uppercase tracking-wide text-slate-600"
                       >
                         <option value="ALL">All</option>
-                        {Object.entries(bucketLabel).map(([key, label]) => (
-                          <option key={key} value={key}>
-                            {label}
-                          </option>
-                        ))}
+                        {Object.entries(bucketLabel)
+                          .filter(([key]) => key !== "ELIGIBLE_NOT_ENROLLED" && key !== "NOT_ELIGIBLE_NOT_ENROLLED")
+                          .map(([key, label]) => (
+                            <option key={key} value={key}>
+                              {label}
+                            </option>
+                          ))}
                       </select>
                     </div>
                   </th>

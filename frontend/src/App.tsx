@@ -487,12 +487,130 @@ const GovWestBengalEmblem = () => (
   <img 
     src="/wb_logo.png" 
     alt="Govt. of West Bengal Logo" 
-    className="w-16 h-16 object-contain shrink-0 transition-transform duration-300 hover:scale-105" 
+    className="h-24 w-24 object-contain shrink-0 drop-shadow-[0_8px_18px_rgba(15,23,42,0.14)] transition-transform duration-300 hover:scale-105" 
   />
 )
 
-const GOVT_HERO_BG =
-  "https://upload.wikimedia.org/wikipedia/commons/thumb/9/99/Victoria_Memorial%2C_Kolkata.jpg/1280px-Victoria_Memorial%2C_Kolkata.jpg"
+
+
+const SUGGESTIONS = [
+  {
+    category: "Key Schemes",
+    items: [
+      {
+        title: "Lokkhir Bhandar",
+        description: "Verify eligibility age and income thresholds for direct financial support.",
+        query: "What are the eligibility criteria and monthly benefit amounts for the Lokkhir Bhandar scheme?",
+        icon: "💳"
+      },
+      {
+        title: "Swasthya Sathi",
+        description: "Explore group health protection benefits and universal health coverage scope.",
+        query: "What is the coverage scope and who is eligible under the Swasthya Sathi health scheme?",
+        icon: "🏥"
+      },
+      {
+        title: "Banglar Bari (Gramin)",
+        description: "Check financial assistance rules and exclusions for rural housing construction.",
+        query: "Explain the eligibility criteria and exclusion rules for the Banglar Bari (Gramin) housing scheme.",
+        icon: "🏠"
+      },
+      {
+        title: "Chaa Sundari Extension",
+        description: "Review homestead land allocations and building funds for tea garden workers.",
+        query: "What are the key features and eligibility rules for the Chaa Sundari Extension housing scheme?",
+        icon: "🏡"
+      }
+    ]
+  },
+  {
+    category: "Treasury & Finance Policy",
+    items: [
+      {
+        title: "Mission Vatsalya",
+        description: "Audit guidelines for child protection services, funding, and CWCs.",
+        query: "Explain the institutional framework and funding rules under the Mission Vatsalya child welfare guidelines.",
+        icon: "🧸"
+      },
+      {
+        title: "Amar Fasal Amar Gola",
+        description: "Check storage structure subsidies and marketing guidelines for onion preservation.",
+        query: "What are the subsidies and implementation rules for Onion Storage Structures under Amar Fasal Amar Gola?",
+        icon: "🧅"
+      },
+      {
+        title: "Post-Matric Scholarship",
+        description: "Verify freeship card rules, eligibility, and scholarship groups for OBC/EBC students.",
+        query: "What are the eligibility rules and scholarship groups under the Post-Matric Scholarship for OBC/EBC students?",
+        icon: "🎓"
+      }
+    ]
+  }
+];
+
+const RAGLoader = () => {
+  const steps = [
+    "Parsing semantic query & extracting policy intent...",
+    "Querying vector database for matching circulars & notifications...",
+    "Scanning Neo4j Knowledge Graph for relational scheme anomalies...",
+    "Running cross-validation on treasury budget rules & metadata...",
+    "Synthesizing audit-ready response with grounded citations..."
+  ];
+  const [currentStep, setCurrentStep] = useState(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentStep((prev) => (prev < steps.length - 1 ? prev + 1 : prev));
+    }, 1800);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="w-full bg-gradient-to-r from-slate-50 to-white border border-slate-100 rounded-3xl p-8 shadow-sm flex flex-col md:flex-row items-center gap-6 animate-in fade-in duration-300 relative overflow-hidden">
+      {/* Decorative background grid/pulse */}
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,rgba(11,76,140,0.02),transparent_35%)] pointer-events-none" />
+      
+      {/* Big Aesthetic Spinning/Pulsing Visual */}
+      <div className="relative flex items-center justify-center shrink-0 w-16 h-16 rounded-2xl bg-blue-50/50 border border-blue-100/50 shadow-inner">
+        {/* Pulsing glow ring */}
+        <span className="absolute inset-0 rounded-2xl bg-blue-500/10 animate-pulse" />
+        
+        {/* Animated RAG Oracle logo or network particles */}
+        <div className="relative w-8 h-8 flex items-center justify-center">
+          <Network className="w-6 h-6 text-[#0B4C8C] animate-pulse" />
+          <div className="absolute inset-0 rounded-full border-2 border-t-[#FF9933] border-r-transparent border-b-[#138808] border-l-transparent animate-spin" style={{ animationDuration: '1200ms' }} />
+        </div>
+      </div>
+
+      {/* Progress & Text */}
+      <div className="flex-1 w-full space-y-4">
+        <div className="space-y-1">
+          <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-[0.2em] text-[#0B4C8C]">
+            <span>Deep Synthesis Engine</span>
+            <span className="text-[#FF9933] animate-pulse">Running</span>
+          </div>
+          <p className="text-sm font-semibold text-slate-800 transition-all duration-300 animate-pulse">
+            {steps[currentStep]}
+          </p>
+        </div>
+
+        {/* Custom Progress Bar */}
+        <div className="relative w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+          <div 
+            className="absolute top-0 left-0 h-full bg-gradient-to-r from-[#FF9933] via-[#0B4C8C] to-[#138808] rounded-full transition-all duration-500 ease-out"
+            style={{ width: `${((currentStep + 1) / steps.length) * 100}%` }}
+          />
+        </div>
+
+        {/* Sub-details (skeletons) */}
+        <div className="space-y-2.5 opacity-40">
+          <div className="h-2 bg-slate-200 rounded-full w-4/5 animate-pulse" />
+          <div className="h-2 bg-slate-200 rounded-full w-2/3 animate-pulse" />
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export default function App() {
   const [, setDocuments] = useState<Document[]>([])
@@ -504,7 +622,7 @@ export default function App() {
   const [query, setQuery] = useState('');
   const [activeTab, setActiveTab] = useState('research');
   const [querying, setQuerying] = useState(false);
-  const [savingAnalysis, setSavingAnalysis] = useState(false)
+  const [, setSavingAnalysis] = useState(false)
   const [result, setResult] = useState<QueryResult | null>(null)
   const [selectedSource, setSelectedSource] = useState<Source | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -519,10 +637,12 @@ export default function App() {
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [speakingMessageIndex, setSpeakingMessageIndex] = useState<number | null>(null)
   const [voiceLanguage, setVoiceLanguage] = useState<'en-IN' | 'hi-IN'>('en-IN')
-  const [sttMode, setSttMode] = useState<'live' | 'accurate'>('accurate')
+  const sttMode: 'live' | 'accurate' = 'live'
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (chatHistory.length > 0 || querying) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
   }, [chatHistory, querying])
 
   useEffect(() => {
@@ -954,11 +1074,11 @@ export default function App() {
     }
   }
 
-  const handleQuery = async () => {
+  const handleQuery = async (queryOverride?: string) => {
     if (isRecording) {
       handleStopRecording()
     }
-    const currentQuery = query.trim()
+    const currentQuery = (queryOverride ?? query).trim()
     if (!currentQuery) return
     setQuerying(true)
     setQuery('')
@@ -1187,6 +1307,71 @@ export default function App() {
       || scheme.name.toLowerCase().includes(search)
     )
   })
+  const isResearchWelcomeState = chatHistory.length === 0 && !querying
+  const renderCivicBackdrop = () => (
+    <>
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_left_center,rgba(217,119,6,0.12),transparent_24%),radial-gradient(circle_at_top_right,rgba(11,76,140,0.10),transparent_20%),radial-gradient(circle_at_bottom_left,rgba(11,76,140,0.06),transparent_26%)]" />
+      <div
+        className="pointer-events-none absolute -top-28 -left-10 h-[360px] w-[360px] opacity-22"
+        style={{
+          backgroundImage:
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 400'%3E%3Cg fill='none' stroke='rgba(90,111,138,0.34)' stroke-width='10'%3E%3Ccircle cx='200' cy='200' r='150'/%3E%3C/g%3E%3Cg stroke='rgba(90,111,138,0.26)' stroke-width='3'%3E%3Cline x1='200' y1='200' x2='200' y2='50'/%3E%3Cline x1='200' y1='200' x2='238.82' y2='55.11'/%3E%3Cline x1='200' y1='200' x2='275' y2='70.1'/%3E%3Cline x1='200' y1='200' x2='306.07' y2='93.93'/%3E%3Cline x1='200' y1='200' x2='329.9' y2='125'/%3E%3Cline x1='200' y1='200' x2='344.89' y2='161.18'/%3E%3Cline x1='200' y1='200' x2='350' y2='200'/%3E%3Cline x1='200' y1='200' x2='344.89' y2='238.82'/%3E%3Cline x1='200' y1='200' x2='329.9' y2='275'/%3E%3Cline x1='200' y1='200' x2='306.07' y2='306.07'/%3E%3Cline x1='200' y1='200' x2='275' y2='329.9'/%3E%3Cline x1='200' y1='200' x2='238.82' y2='344.89'/%3E%3Cline x1='200' y1='200' x2='200' y2='350'/%3E%3Cline x1='200' y1='200' x2='161.18' y2='344.89'/%3E%3Cline x1='200' y1='200' x2='125' y2='329.9'/%3E%3Cline x1='200' y1='200' x2='93.93' y2='306.07'/%3E%3Cline x1='200' y1='200' x2='70.1' y2='275'/%3E%3Cline x1='200' y1='200' x2='55.11' y2='238.82'/%3E%3Cline x1='200' y1='200' x2='50' y2='200'/%3E%3Cline x1='200' y1='200' x2='55.11' y2='161.18'/%3E%3Cline x1='200' y1='200' x2='70.1' y2='125'/%3E%3Cline x1='200' y1='200' x2='93.93' y2='93.93'/%3E%3Cline x1='200' y1='200' x2='125' y2='70.1'/%3E%3Cline x1='200' y1='200' x2='161.18' y2='55.11'/%3E%3C/g%3E%3C/svg%3E\")",
+          backgroundSize: 'contain',
+          backgroundRepeat: 'no-repeat',
+        }}
+      />
+      <div
+        className="pointer-events-none absolute top-8 right-28 h-[190px] w-[190px] opacity-24"
+        style={{
+          backgroundImage:
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 260 260'%3E%3Cg fill='none' stroke='rgba(90,111,138,0.34)' stroke-width='8'%3E%3Ccircle cx='130' cy='130' r='92'/%3E%3C/g%3E%3Cg stroke='rgba(90,111,138,0.24)' stroke-width='2.6'%3E%3Cline x1='130' y1='130' x2='130' y2='38'/%3E%3Cline x1='130' y1='130' x2='153.81' y2='41.19'/%3E%3Cline x1='130' y1='130' x2='176' y2='50.33'/%3E%3Cline x1='130' y1='130' x2='195.05' y2='64.95'/%3E%3Cline x1='130' y1='130' x2='209.67' y2='84'/%3E%3Cline x1='130' y1='130' x2='218.81' y2='106.19'/%3E%3Cline x1='130' y1='130' x2='222' y2='130'/%3E%3Cline x1='130' y1='130' x2='218.81' y2='153.81'/%3E%3Cline x1='130' y1='130' x2='209.67' y2='176'/%3E%3Cline x1='130' y1='130' x2='195.05' y2='195.05'/%3E%3Cline x1='130' y1='130' x2='176' y2='209.67'/%3E%3Cline x1='130' y1='130' x2='153.81' y2='218.81'/%3E%3Cline x1='130' y1='130' x2='130' y2='222'/%3E%3Cline x1='130' y1='130' x2='106.19' y2='218.81'/%3E%3Cline x1='130' y1='130' x2='84' y2='209.67'/%3E%3Cline x1='130' y1='130' x2='64.95' y2='195.05'/%3E%3Cline x1='130' y1='130' x2='50.33' y2='176'/%3E%3Cline x1='130' y1='130' x2='41.19' y2='153.81'/%3E%3Cline x1='130' y1='130' x2='38' y2='130'/%3E%3Cline x1='130' y1='130' x2='41.19' y2='106.19'/%3E%3Cline x1='130' y1='130' x2='50.33' y2='84'/%3E%3Cline x1='130' y1='130' x2='64.95' y2='64.95'/%3E%3Cline x1='130' y1='130' x2='84' y2='50.33'/%3E%3Cline x1='130' y1='130' x2='106.19' y2='41.19'/%3E%3C/g%3E%3Ccircle cx='130' cy='130' r='14' fill='rgba(90,111,138,0.28)'/%3E%3C/svg%3E\")",
+          backgroundSize: 'contain',
+          backgroundRepeat: 'no-repeat',
+        }}
+      />
+      <div
+        className="pointer-events-none absolute inset-0 opacity-55"
+        style={{
+          backgroundImage:
+            "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 800'%3E%3Cg fill='none' stroke='rgba(135,149,168,0.22)' stroke-width='1.5'%3E%3Cpath d='M84 584 246 396 418 560 582 302 770 442 938 250'/%3E%3Cpath d='M902 172 1034 246 1122 136' stroke-dasharray='4 8'/%3E%3Cpath d='M176 664 336 590 496 690' stroke-dasharray='5 7'/%3E%3C/g%3E%3Cg fill='rgba(135,149,168,0.42)'%3E%3Ccircle cx='84' cy='584' r='6'/%3E%3Ccircle cx='246' cy='396' r='7'/%3E%3Ccircle cx='418' cy='560' r='6'/%3E%3Ccircle cx='582' cy='302' r='7'/%3E%3Ccircle cx='770' cy='442' r='6'/%3E%3Ccircle cx='938' cy='250' r='7'/%3E%3Ccircle cx='1034' cy='246' r='5'/%3E%3Ccircle cx='1122' cy='136' r='5'/%3E%3Ccircle cx='176' cy='664' r='5'/%3E%3Ccircle cx='496' cy='690' r='5'/%3E%3Ccircle cx='336' cy='590' r='5'/%3E%3C/g%3E%3Cg fill='rgba(255,153,51,0.30)'%3E%3Ccircle cx='128' cy='524' r='5'/%3E%3Ccircle cx='964' cy='214' r='5'/%3E%3C/g%3E%3Cg fill='rgba(11,76,140,0.08)'%3E%3Ccircle cx='1048' cy='520' r='82'/%3E%3Cpath d='M1012 492h72v56h-72z'/%3E%3Cpath d='M1028 492v-16c0-18 14-32 32-32s32 14 32 32v16' stroke='rgba(11,76,140,0.15)' stroke-width='8' fill='none'/%3E%3C/g%3E%3Cg fill='rgba(11,76,140,0.08)'%3E%3Ccircle cx='858' cy='620' r='58'/%3E%3Cpath d='M836 618h44M836 634h44M836 650h30' stroke='rgba(11,76,140,0.18)' stroke-width='6' stroke-linecap='round'/%3E%3C/g%3E%3C/svg%3E\")",
+          backgroundSize: 'cover',
+          backgroundRepeat: 'no-repeat',
+          backgroundPosition: 'center',
+        }}
+      />
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-[linear-gradient(to_bottom,rgba(11,76,140,0.10),transparent)]" />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-[linear-gradient(to_top,rgba(181,101,29,0.16),rgba(181,101,29,0.06),transparent)]" />
+    </>
+  )
+
+  const renderQueryBar = (isCentered: boolean) => {
+    return (
+      <div className={`w-full ${isCentered ? 'max-w-[850px]' : 'max-w-[1300px]'} mx-auto relative cursor-text group`} onClick={() => {
+        const inputId = isCentered ? 'query-input-centered' : 'query-input';
+        document.getElementById(inputId)?.focus();
+      }}>
+        <div className="absolute inset-x-0 bottom-[-8px] h-full bg-slate-900/5 blur-2xl rounded-3xl" />
+        <div className={`relative bg-white border border-slate-200/90 rounded-3xl p-1.5 flex gap-0 shadow-[0px_20px_50px_rgba(0,0,0,0.06)] group-hover:border-slate-400 focus-within:border-slate-500 focus-within:ring-4 focus-within:ring-slate-100 transition-all duration-300 ${isCentered ? 'scale-105' : ''}`}>
+          <Input
+            id={isCentered ? 'query-input-centered' : 'query-input'}
+            placeholder="Synthesize information about schemes, budgets, circulars..."
+            value={query}
+            autoComplete="off"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+            onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleQuery() }}
+            className="flex-1 bg-transparent border-none shadow-none text-base px-6 py-4 h-14 placeholder:text-slate-400 text-slate-800 font-medium focus-visible:ring-0"
+          />
+          <Button
+            onClick={() => handleQuery()}
+            disabled={querying || isTranscribing || !query.trim()}
+            className="bg-[#0B4C8C] hover:bg-[#093d70] text-white w-14 h-14 rounded-2xl flex items-center justify-center p-0 shrink-0 transition-all duration-200 active:scale-95 shadow-md shadow-blue-200/50 disabled:opacity-50 disabled:shadow-none"
+          >
+            {querying || isTranscribing ? <Loader2 className="w-6 h-6 animate-spin" /> : <Search className="w-6 h-6" />}
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full bg-[#f4f7fb] text-slate-900 font-sans selection:bg-slate-900 selection:text-white overflow-hidden border-t-4 border-[#FF9933]">
@@ -1289,6 +1474,13 @@ export default function App() {
           {/* Workspace Side */}
           <div className="flex-1 flex flex-col bg-white overflow-hidden relative">
             {/* Conditionally hide standard header for Registry for full-screen immersion */}
+            {activeTab !== 'registry' && (
+              <div className="w-full bg-[#FF9933] text-white text-[10px] md:text-[11px] font-extrabold py-1.5 overflow-hidden relative flex items-center select-none shrink-0 border-b border-amber-500/20">
+                <div className="inline-block animate-marquee hover:[animation-play-state:paused] cursor-pointer pl-[100%] whitespace-nowrap">
+                  Search verified policy circulars, verify citizen benefit scheme criteria, check state budget structures, and inspect official treasury directives with audit-ready accuracy.
+                </div>
+              </div>
+            )}
             <header className={`h-20 border-b border-slate-100 flex flex-col justify-center px-10 shrink-0 bg-white ${activeTab === 'registry' ? 'hidden' : ''}`}>
               <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-slate-500 border-b border-slate-100 pb-2">
                 <p>Government Service Intelligence Portal</p>
@@ -1332,40 +1524,172 @@ export default function App() {
 
             <div className="flex-1 flex flex-col overflow-hidden min-h-0">
               {/* ── Social Registry Dashboard Tab ── */}
-              <TabsContent value="registry" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none bg-[#fcfdfe] data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
-                <UsrDashboard API={API} />
+              <TabsContent value="registry" className="relative flex-1 flex flex-col min-h-0 overflow-y-auto overflow-x-hidden m-0 p-0 border-none outline-none bg-[#fcfdfe] data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
+                <div className="pointer-events-none absolute inset-x-0 top-0 h-72 overflow-hidden">
+                  <div className="absolute inset-0 bg-[linear-gradient(140deg,#fffdf8_0%,#f7f2e9_36%,#edf4ff_72%,#f8fbff_100%)]" />
+                  {renderCivicBackdrop()}
+                </div>
+                <div className="relative z-10 flex-1 min-h-0 h-full">
+                  <UsrDashboard API={API} />
+                </div>
               </TabsContent>
 
-              <TabsContent value="eligibility" className="flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
-                <EligibilityStudio API={API} />
+              <TabsContent value="eligibility" className="relative flex-1 flex flex-col min-h-0 overflow-hidden m-0 p-0 border-none outline-none bg-[linear-gradient(140deg,#fffdf8_0%,#f7f2e9_36%,#edf4ff_72%,#f8fbff_100%)] data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
+                {renderCivicBackdrop()}
+                <div className="relative z-10 flex-1 min-h-0">
+                  <EligibilityStudio API={API} />
+                </div>
               </TabsContent>
 
-              <TabsContent value="research" className="flex-1 flex flex-col overflow-hidden min-h-0 mt-0 m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex" forceMount>
+              <TabsContent
+                value="research"
+                className={`relative flex-1 flex flex-col overflow-hidden min-h-0 mt-0 m-0 p-0 border-none outline-none data-[state=inactive]:hidden data-[state=active]:flex ${
+                  isResearchWelcomeState
+                    ? 'bg-[linear-gradient(140deg,#fffdf8_0%,#f7f2e9_36%,#edf4ff_72%,#f8fbff_100%)]'
+                    : 'bg-white'
+                }`}
+                forceMount
+              >
+                {isResearchWelcomeState && renderCivicBackdrop()}
                 <ScrollArea className="flex-1 h-full">
-                  <div className="w-full max-w-[1300px] mx-auto px-6 lg:px-10 pt-10 pb-32 space-y-10">
+                  <div className={`relative z-10 w-full max-w-[1300px] mx-auto px-6 lg:px-10 pt-10 pb-32 ${isResearchWelcomeState ? 'space-y-6' : 'space-y-10'}`}>
                     {/* Hero Welcome Area */}
-                    {chatHistory.length === 0 && !querying && (
-                      <div className="relative overflow-hidden rounded-3xl border border-slate-200 shadow-lg animate-in fade-in duration-700 min-h-[360px]">
-                        <div
-                          className="absolute inset-0 bg-cover bg-center"
-                          style={{ backgroundImage: `url(${GOVT_HERO_BG})` }}
-                        />
-                        <div className="absolute inset-0 bg-gradient-to-r from-[#0B2E59]/90 via-[#0B2E59]/75 to-[#0B2E59]/65" />
-                        <div className="relative z-10 p-10 md:p-12 text-white">
-                          <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-4 py-1.5 border border-white/20">
+                    {isResearchWelcomeState && (
+                      <div className="w-full flex flex-col items-center justify-center pt-8 pb-4 animate-in fade-in duration-700 relative z-10">
+                        {/* Emblem and Official Badge */}
+                        <div className="flex flex-col items-center gap-3 mb-6">
+                          <div className="inline-flex items-center gap-2 rounded-full bg-amber-50 px-4 py-1.5 border border-amber-200/50 shadow-sm">
                             <Zap className="w-3.5 h-3.5 text-[#FF9933]" />
-                            <span className="text-[10px] font-bold uppercase tracking-widest">Official Knowledge Assistant</span>
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-[#0B4C8C]">Official Policy & Scheme Assistant</span>
                           </div>
-                          <h1 className="mt-5 text-3xl md:text-4xl font-black tracking-tight leading-tight">
-                            Citizen Services Intelligence Platform
-                          </h1>
-                          <p className="mt-4 text-sm md:text-base text-slate-100 max-w-2xl leading-relaxed">
-                            Search verified scheme information, policy context, and eligibility evidence through a transparent and auditable government-grade interface.
-                          </p>
-                          <div className="mt-8 flex flex-wrap gap-3 text-[11px] font-bold uppercase tracking-wider">
-                            <span className="rounded-full bg-white/10 border border-white/20 px-4 py-2">Trusted Sources</span>
-                            <span className="rounded-full bg-white/10 border border-white/20 px-4 py-2">Policy Research</span>
-                            <span className="rounded-full bg-white/10 border border-white/20 px-4 py-2">Registry Insights</span>
+                        </div>
+
+                        {/* Title and Subtitle */}
+                        <h1 className="text-4xl md:text-5xl font-black tracking-tight text-center leading-tight text-slate-900 max-w-3xl">
+                          West Bengal <span className="text-gradient-navy-gold">Finance Department</span>
+                        </h1>
+
+                        {/* Premium Large Centered Voice Hub */}
+                        <div className="mt-8 flex flex-col items-center gap-5 animate-in fade-in slide-in-from-bottom-3 duration-500">
+                          {/* Centered Large Circular Mic Button */}
+                          <div className="relative group">
+                            {/* Outer animated rings when recording */}
+                            {isRecording && (
+                              <>
+                                <span 
+                                  className="absolute -inset-4 rounded-full bg-rose-500/10 animate-ping" 
+                                  style={{ animationDuration: '1500ms' }}
+                                />
+                                <span 
+                                  className="absolute -inset-8 rounded-full bg-rose-500/5 animate-pulse" 
+                                  style={{ animationDuration: '2000ms' }}
+                                />
+                              </>
+                            )}
+                            {/* Hover glow effect */}
+                            <span className="absolute -inset-2 rounded-full bg-gradient-to-tr from-[#0B4C8C] to-[#1e5d9f] opacity-20 blur-md group-hover:opacity-35 transition duration-300" />
+                            
+                            <Button
+                              onClick={isRecording ? handleStopRecording : handleStartRecording}
+                              disabled={querying || isTranscribing}
+                              className={`relative w-24 h-24 rounded-full p-0 flex items-center justify-center transition-all duration-300 shadow-lg border-4
+                                ${isRecording 
+                                  ? 'bg-rose-500/10 hover:bg-rose-500/20 border-rose-400 text-rose-500 shadow-rose-200/50' 
+                                  : 'bg-[#0B4C8C]/10 hover:bg-[#0B4C8C]/20 border-[#0B4C8C]/30 text-[#0B4C8C] hover:scale-105 active:scale-95 shadow-blue-100/50'
+                                }`}
+                              title={isRecording ? "Stop recording" : "Start voice input"}
+                            >
+                              {isRecording ? (
+                                <Square className="w-10 h-10 fill-current animate-pulse" />
+                              ) : (
+                                <Mic className="w-12 h-12" />
+                              )}
+                            </Button>
+                          </div>
+
+                          {/* Subtle Language Selector Below Mic */}
+                          <div className="flex items-center gap-2 mt-1 bg-white border border-slate-200/70 px-4 py-2 rounded-full shadow-sm">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Language:</span>
+                            <select
+                              value={voiceLanguage}
+                              onChange={(e) => setVoiceLanguage((e.target.value as 'en-IN' | 'hi-IN'))}
+                              className="bg-transparent text-[11px] font-bold text-slate-700 outline-none cursor-pointer hover:text-slate-900 transition-colors"
+                              aria-label="Voice language"
+                            >
+                              <option value="en-IN">English (EN)</option>
+                              <option value="hi-IN">Hindi (HI)</option>
+                            </select>
+                          </div>
+
+                          {isRecording && (
+                            <p className="text-[10px] font-bold text-rose-500 uppercase tracking-widest animate-pulse mt-1">
+                              Listening... Speak now
+                            </p>
+                          )}
+                        </div>
+
+
+                        {/* Centered Search Bar */}
+                        <div className="mt-10 w-full flex justify-center animate-fade-in-up">
+                          {renderQueryBar(true)}
+                        </div>
+
+                        {/* Suggestions Grid */}
+                        <div className="mt-14 w-full max-w-[950px] space-y-10 animate-fade-in-up">
+                          <div>
+                            <div className="flex items-center justify-center gap-3 mb-5">
+                              <div className="h-[2px] w-8 bg-gradient-to-r from-transparent to-[#FF9933]" />
+                              <h2 className="text-[11px] font-extrabold uppercase tracking-[0.2em] text-slate-400">Key Welfare Schemes</h2>
+                              <div className="h-[2px] w-8 bg-gradient-to-l from-transparent to-[#138808]" />
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                              {SUGGESTIONS[0].items.map((item, idx) => (
+                                <div 
+                                  key={idx}
+                                  onClick={() => {
+                                    setQuery(item.query);
+                                    handleQuery(item.query);
+                                  }}
+                                  className="glass-card hover:border-[#D4AF37]/50 border-slate-200/60 p-5 rounded-2xl cursor-pointer hover:shadow-md transition-all duration-300 flex flex-col justify-between h-full group card-premium-shadow bg-white/70 hover:bg-white"
+                                >
+                                  <div>
+                                    <div className="text-2xl mb-3 group-hover:scale-110 transition-transform duration-300 w-fit">{item.icon}</div>
+                                    <h3 className="font-bold text-slate-800 text-sm mb-1 group-hover:text-[#0B4C8C] transition-colors">{item.title}</h3>
+                                    <p className="text-[11px] text-slate-500 leading-relaxed font-medium">{item.description}</p>
+                                  </div>
+                                  <div className="mt-4 flex items-center text-[10px] font-bold text-[#0B4C8C] group-hover:translate-x-1 transition-transform">
+                                    Query Scheme →
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-center gap-3 mb-5">
+                              <div className="h-[2px] w-8 bg-gradient-to-r from-transparent to-[#D4AF37]" />
+                              <h2 className="text-[11px] font-extrabold uppercase tracking-[0.2em] text-slate-400">Treasury & Finance Policy</h2>
+                              <div className="h-[2px] w-8 bg-gradient-to-l from-transparent to-[#D4AF37]" />
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                              {SUGGESTIONS[1].items.map((item, idx) => (
+                                <div 
+                                  key={idx}
+                                  onClick={() => {
+                                    setQuery(item.query);
+                                    handleQuery(item.query);
+                                  }}
+                                  className="glass-card hover:border-[#D4AF37]/50 border-slate-200/60 p-5 rounded-2xl cursor-pointer hover:shadow-md transition-all duration-300 flex flex-row items-center gap-4 h-full group card-premium-shadow bg-white/70 hover:bg-white"
+                                >
+                                  <div className="text-3xl p-3 bg-slate-50 rounded-xl group-hover:scale-115 transition-transform duration-300 shrink-0">{item.icon}</div>
+                                  <div className="flex-1 min-w-0">
+                                    <h3 className="font-bold text-slate-800 text-sm mb-0.5 group-hover:text-[#0B4C8C] transition-colors">{item.title}</h3>
+                                    <p className="text-[11px] text-slate-500 leading-relaxed font-medium">{item.description}</p>
+                                  </div>
+                                  <div className="text-[#0B4C8C] font-bold text-sm shrink-0 group-hover:translate-x-1 transition-transform pr-2">→</div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1434,39 +1758,6 @@ export default function App() {
                                         Stop
                                       </Button>
                                     )}
-                                    {resData.confidence_score !== undefined && (
-                                      <TooltipProvider>
-                                        <Tooltip>
-                                          <TooltipTrigger asChild>
-                                            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-100/60 shadow-sm cursor-help hover:bg-emerald-100/50 transition-colors">
-                                              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                                              <span>{Math.round(resData.confidence_score * 100)}% Confidence</span>
-                                            </div>
-                                          </TooltipTrigger>
-                                          <TooltipContent className="bg-slate-950 text-white border-none p-3 rounded-xl shadow-2xl max-w-xs">
-                                            <p className="font-bold text-xs mb-1">Synthesized Answer Confidence</p>
-                                            <p className="text-[10px] text-slate-400 font-medium">Measures semantic alignment, document support, and absence of logical contradictions in the final response.</p>
-                                          </TooltipContent>
-                                        </Tooltip>
-                                      </TooltipProvider>
-                                    )}
-
-                                    {resData.citation_coverage !== undefined && (
-                                      <TooltipProvider>
-                                        <Tooltip>
-                                          <TooltipTrigger asChild>
-                                            <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-bold bg-violet-50 text-violet-700 border border-violet-100/60 shadow-sm cursor-help hover:bg-violet-100/50 transition-colors">
-                                              <FileText className="w-3.5 h-3.5 text-violet-500" />
-                                              <span>{Math.round(resData.citation_coverage * 100)}% Grounding</span>
-                                            </div>
-                                          </TooltipTrigger>
-                                          <TooltipContent className="bg-slate-950 text-white border-none p-3 rounded-xl shadow-2xl max-w-xs">
-                                            <p className="font-bold text-xs mb-1">Citation Grounding Ratio</p>
-                                            <p className="text-[10px] text-slate-400 font-medium">Represents the proportion of statements in the answer backed by explicit source citations.</p>
-                                          </TooltipContent>
-                                        </Tooltip>
-                                      </TooltipProvider>
-                                    )}
 
                                     <TooltipProvider>
                                       <Tooltip>
@@ -1495,8 +1786,7 @@ export default function App() {
 
                                 <div className="prose prose-slate max-w-none text-[15px] leading-[1.8] text-slate-800 font-medium border-l-4 border-slate-900 pl-8 transition-all hover:bg-slate-50/50 py-2 rounded-r-2xl
                                    prose-headings:text-slate-900 prose-headings:font-bold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base
-                                   prose-p:mb-4 prose-ul:list-disc prose-ul:pl-6 prose-li:mb-1
-                                   prose-table:w-full prose-table:table-fixed prose-table:border prose-table:border-slate-200 prose-th:bg-slate-50 prose-th:p-2 prose-td:p-2 prose-td:border-t prose-td:align-top">
+                                   prose-p:mb-4 prose-ul:list-disc prose-ul:pl-6 prose-li:mb-1">
                                   <ReactMarkdown
                                     remarkPlugins={[remarkGfm]}
                                     components={{
@@ -1555,9 +1845,29 @@ export default function App() {
 
                                         return <code className={className} {...props}>{children}</code>;
                                       },
+                                      table: ({ node, ...props }) => (
+                                        <div className="my-6 overflow-hidden rounded-2xl border border-slate-200/60 shadow-md bg-white max-w-full overflow-x-auto relative">
+                                          <div className="h-[3px] w-full bg-gradient-to-r from-[#FF9933] via-[#0B4C8C] to-[#138808]" />
+                                          <table {...props} className="w-full border-collapse text-left text-xs" />
+                                        </div>
+                                      ),
+                                      thead: ({ node, ...props }) => (
+                                        <thead {...props} className="bg-gradient-to-r from-[#0B4C8C] to-[#12589d] text-white text-[10px] font-extrabold uppercase tracking-wider border-b border-[#0B4C8C]/20" />
+                                      ),
+                                      tr: ({ node, ...props }) => (
+                                        <tr {...props} className="border-b border-slate-100/80 last:border-0 hover:bg-[#0B4C8C]/5 transition-colors duration-150 odd:bg-white even:bg-slate-50/40" />
+                                      ),
+                                      th: ({ node, ...props }) => (
+                                        <th {...props} className="p-3.5 font-extrabold text-white align-middle border-r border-white/10 last:border-r-0">
+                                          {renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}
+                                        </th>
+                                      ),
+                                      td: ({ node, ...props }) => (
+                                        <td {...props} className="p-3.5 text-slate-700 font-semibold align-middle leading-normal border-r border-slate-100/60 last:border-r-0">
+                                          {renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}
+                                        </td>
+                                      ),
                                       p: ({ node, ...props }) => <p {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</p>,
-                                      td: ({ node, ...props }) => <td {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</td>,
-                                      th: ({ node, ...props }) => <th {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</th>,
                                       li: ({ node, ...props }) => <li {...props}>{renderWithLineBreaksAndCitations(props.children, resData.sources || [], setSelectedSource)}</li>
                                     }}
                                   >
@@ -1583,16 +1893,7 @@ export default function App() {
                     )}
 
                     {/* Pulse Loading Indicator */}
-                    {querying && (
-                      <div className="flex gap-4 p-6 bg-slate-50/50 border border-slate-100 rounded-3xl animate-in fade-in duration-300">
-                        <Loader2 className="w-5 h-5 text-[#0B4C8C] animate-spin shrink-0" />
-                        <div className="space-y-3 flex-1">
-                          <p className="text-xs font-bold uppercase tracking-wider text-[#0B4C8C]">Synthesizing Relational Intelligence...</p>
-                          <div className="h-2 bg-slate-200 rounded-full w-3/4" />
-                          <div className="h-2 bg-slate-200 rounded-full w-1/2" />
-                        </div>
-                      </div>
-                    )}
+                    {querying && <RAGLoader />}
 
                     {/* Auto-scroll target */}
                     <div ref={chatEndRef} />
@@ -1600,61 +1901,17 @@ export default function App() {
                 </ScrollArea>
 
                 {/* Fixed Query Bar Area */}
-                <div className="absolute bottom-10 left-10 right-10 z-20">
-                  <div className="w-full max-w-[1300px] mx-auto relative cursor-text group" onClick={() => document.getElementById('query-input')?.focus()}>
-                    <div className="absolute inset-x-0 bottom-[-8px] h-full bg-slate-900/5 blur-2xl rounded-3xl" />
-                    <div className="relative bg-white border border-slate-200 rounded-3xl p-1.5 flex gap-0 shadow-[0px_20px_50px_rgba(0,0,0,0.06)] group-hover:border-slate-400 transition-colors">
-                      <Input
-                        id="query-input"
-                        placeholder="Synthesize information about..."
-                        value={query}
-                        autoComplete="off"
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
-                        onKeyDown={(e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleQuery() }}
-                        className="flex-1 bg-transparent border-none shadow-none text-base p-6 h-14 placeholder:text-slate-300 text-slate-800 font-medium focus-visible:ring-0"
-                      />
-                      <select
-                        value={voiceLanguage}
-                        onChange={(e) => setVoiceLanguage((e.target.value as 'en-IN' | 'hi-IN'))}
-                        className="h-14 bg-transparent border-none text-xs font-semibold text-slate-500 px-2 outline-none"
-                        aria-label="Voice language"
-                      >
-                        <option value="en-IN">EN</option>
-                        <option value="hi-IN">HI</option>
-                      </select>
-                      <select
-                        value={sttMode}
-                        onChange={(e) => setSttMode((e.target.value as 'live' | 'accurate'))}
-                        className="h-14 bg-transparent border-none text-xs font-semibold text-slate-500 px-2 outline-none"
-                        aria-label="STT mode"
-                      >
-                        <option value="accurate">Accurate</option>
-                        <option value="live">Live</option>
-                      </select>
-                      <Button
-                        onClick={isRecording ? handleStopRecording : handleStartRecording}
-                        disabled={querying || isTranscribing}
-                        variant="ghost"
-                        className={`w-12 h-14 rounded-2xl p-0 shrink-0 ${isRecording ? 'text-rose-600' : 'text-slate-600'}`}
-                        title={isRecording ? "Stop recording" : "Start voice input"}
-                      >
-                        {isRecording ? <Square className="w-4 h-4 fill-current" /> : <Mic className="w-5 h-5" />}
-                      </Button>
-                      <Button
-                        onClick={handleQuery}
-                        disabled={querying || isTranscribing || !query.trim()}
-                        className="bg-slate-900 hover:bg-slate-800 text-white w-14 h-14 rounded-2xl flex items-center justify-center p-0 shrink-0 transition-transform active:scale-95"
-                      >
-                        {querying || isTranscribing ? <Loader2 className="w-6 h-6 animate-spin" /> : <Search className="w-6 h-6" />}
-                      </Button>
-                    </div>
+                {(chatHistory.length > 0 || querying) && (
+                  <div className="absolute bottom-10 left-10 right-10 z-20">
+                    {renderQueryBar(false)}
                   </div>
-                </div>
+                )}
               </TabsContent>
 
-              <TabsContent value="map" className="flex-1 relative overflow-hidden min-h-0 mt-0 m-0 p-0 outline-none border-none bg-white h-full min-h-[700px] data-[state=inactive]:hidden data-[state=active]:block" forceMount>
+              <TabsContent value="map" className="flex-1 relative overflow-hidden min-h-0 mt-0 m-0 p-0 outline-none border-none bg-[linear-gradient(140deg,#fffdf8_0%,#f7f2e9_36%,#edf4ff_72%,#f8fbff_100%)] h-full min-h-[700px] data-[state=inactive]:hidden data-[state=active]:block">
+                {renderCivicBackdrop()}
                 {loadingGraph ? (
-                  <div className="flex flex-col items-center justify-center h-full gap-6">
+                  <div className="relative z-10 flex flex-col items-center justify-center h-full gap-6">
                     <div className="relative">
                       <Loader2 className="w-16 h-16 text-slate-900 animate-spin" />
                       <Network className="absolute inset-0 m-auto w-6 h-6 text-slate-900" />
@@ -1662,7 +1919,7 @@ export default function App() {
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.4em] animate-pulse">Mapping Relational Intelligence...</p>
                   </div>
                 ) : (
-                  <div ref={mapContainerRef} className="absolute inset-0 w-full h-full cursor-grab active:cursor-grabbing">
+                  <div ref={mapContainerRef} className="absolute inset-0 z-10 w-full h-full cursor-grab active:cursor-grabbing">
                     <ForceGraph2D
                       ref={graphRef}
                       graphData={graphData}
@@ -1720,7 +1977,7 @@ export default function App() {
                       linkDirectionalParticleSpeed={0.005}
                       linkColor={() => '#cbd5e1'}
                       linkWidth={1.5}
-                      backgroundColor="#ffffff"
+                      backgroundColor="rgba(0,0,0,0)"
                       cooldownTicks={100}
                     />
 

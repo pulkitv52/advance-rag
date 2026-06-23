@@ -240,8 +240,20 @@ def _extract_scheme_id(query: str) -> str | None:
     
     # Try friendly name mapping
     q_clean = re.sub(r"[^a-z0-9\s]", "", query.lower())
-    if "swasthya" in q_clean or "sathi" in q_clean or "swastha" in q_clean or "swasth" in q_clean:
+    if any(k in q_clean for k in ("swasthya", "sathi", "swastha", "swasth")):
         return "S767"
+    if any(k in q_clean for k in ("lokkhir", "lokhir", "lakhinar", "lakshmir", "bhandar", "lakhir")):
+        return "S051"
+    if any(k in q_clean for k in ("banglar", "bari")):
+        return "S769"
+    if any(k in q_clean for k in ("chaa", "cha", "sundari")):
+        return "S760"
+    if any(k in q_clean for k in ("mission", "vatsalya", "vatsala")):
+        return "C529"
+    if any(k in q_clean for k in ("amar", "fasal", "gola")):
+        return "S589"
+    if any(k in q_clean for k in ("post", "matric", "scholarship")):
+        return "C501"
     return None
 
 
@@ -356,6 +368,15 @@ def _build_usr_uid_answer(uid: str, row: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _is_simple_greeting(query: str) -> bool:
+    q = query.strip().lower().strip("?.!,")
+    greetings = {
+        "hello", "hi", "hey", "hola", "greetings", "howdy", "hi there", "hello there", "hey there",
+        "good morning", "good afternoon", "good evening", "namaste", "namaskar"
+    }
+    return q in greetings
+
+
 @router.post("/", response_model=QueryResponse, summary="Ask a question across your documents")
 async def query_documents(
     request: QueryRequest,
@@ -365,6 +386,44 @@ async def query_documents(
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
 
     start_total = time.perf_counter()
+    if _is_simple_greeting(request.query):
+        answer = (
+            "Hello! I am your Govt. of West Bengal Finance Department Intelligence Assistant.\n\n"
+            "I can assist you with:\n"
+            "1. **Researching Policy Circulars & Treasury Directives**: Ask about audit guidelines, treasury rules, or financial notifications.\n"
+            "2. **Verifying Citizen Benefit Schemes**: Check eligibility criteria and rules for schemes like *Swasthya Sathi*, *Lakshmir Bhandar*, *Amar Fasal Amar Gola*, and more.\n"
+            "3. **Inspecting Social Registry Analytics**: Ask about flagged cases, potential duplicate identity detections, or anomalies in the registry.\n\n"
+            "How can I assist you with your research or queries today?"
+        )
+        total_latency_ms = round((time.perf_counter() - start_total) * 1000, 2)
+        log = QueryLog(
+            query=request.query,
+            answer=answer,
+            chunks_used=0,
+            document_id=request.document_ids[0] if request.document_ids else None,
+            latency_ms=total_latency_ms,
+        )
+        session.add(log)
+        await session.commit()
+        logger.info("[ROUTER AGENT] Conversational greeting matched. Returning preset help answer.")
+        return QueryResponse(
+            query=request.query,
+            answer=answer,
+            sources=[
+                {
+                    "filename": "System Assistant (Greeting)",
+                    "page": None,
+                    "score": 1.0,
+                    "snippet": "Friendly system greeting assistant responder.",
+                }
+            ],
+            latency_ms=total_latency_ms,
+            confidence_score=1.0,
+            citation_coverage=1.0,
+            graph_enrichment_used=False,
+            weak_claims=[],
+        )
+
     normalized_query = normalize_query_text(request.query)
     logger.info(f"--- [QUERY START] --- Query: '{request.query[:100]}...'")
     if normalized_query != request.query:

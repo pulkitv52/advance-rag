@@ -100,5 +100,65 @@
   .intel-card-hover {
     @apply relative overflow-hidden after:absolute after:inset-0 after:bg-gradient-to-r after:from-transparent after:via-white/5 after:to-transparent after:-translate-x-full hover:after:translate-x-full after:transition-transform after:duration-1000;
   }
+
+  .bg-finance-grid {
+    background-color: #f8fafc;
+    background-image: 
+      radial-gradient(at 0% 0%, rgba(11, 76, 140, 0.06) 0px, transparent 50%),
+      radial-gradient(at 50% 0%, rgba(212, 175, 55, 0.04) 0px, transparent 50%),
+      radial-gradient(at 100% 0%, rgba(19, 136, 8, 0.04) 0px, transparent 50%),
+      radial-gradient(at 80% 80%, rgba(11, 76, 140, 0.03) 0px, transparent 40%),
+      radial-gradient(at 20% 80%, rgba(212, 175, 55, 0.03) 0px, transparent 40%);
+    position: relative;
+  }
+  .bg-finance-grid::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.4;
+    background-image: radial-gradient(#cbd5e1 1.2px, transparent 1.2px);
+    background-size: 24px 24px;
+    -webkit-mask-image: radial-gradient(ellipse at center, black, transparent 85%);
+    mask-image: radial-gradient(ellipse at center, black, transparent 85%);
+  }
+
+  .animate-fade-in-up {
+    animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .card-premium-shadow {
+    box-shadow: 
+      0 4px 6px -1px rgb(0 0 0 / 0.05), 
+      0 2px 4px -2px rgb(0 0 0 / 0.05),
+      0 20px 25px -5px rgb(0 0 0 / 0.02);
+  }
+
+  .text-gradient-navy-gold {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-[#0B2E59] via-[#0b4c8c] to-[#a07817];
+  }
+
+  .animate-marquee {
+    animation: marquee 30s linear infinite;
+  }
 }
+
+@keyframes marquee {
+  0% { transform: translateX(0%); }
+  100% { transform: translateX(-100%); }
+}
+
+
 

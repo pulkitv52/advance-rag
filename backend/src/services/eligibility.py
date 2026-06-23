@@ -1,8 +1,10 @@
 import json
 import re
+from pathlib import Path
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from sqlalchemy import text
 from sqlmodel import select
@@ -1816,4 +1818,546 @@ async def run_rule_evaluation(
             ),
         },
         "preview": preview,
+    }
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+FIXED_MANIFEST_DIR = REPO_ROOT / "wikis" / "eligibility_manifests"
+EVALUATED_MANIFEST_DIR = FIXED_MANIFEST_DIR / "evaluations"
+EVALUATED_MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _fixed_manifest_path(scheme_id: str) -> Path:
+    return FIXED_MANIFEST_DIR / f"{str(scheme_id or '').upper()}.json"
+
+
+def list_fixed_manifests() -> List[Dict[str, Any]]:
+    manifests: List[Dict[str, Any]] = []
+    if not FIXED_MANIFEST_DIR.exists():
+        return manifests
+
+    for path in sorted(FIXED_MANIFEST_DIR.glob("*.json")):
+        if path.name == "evaluated_manifest_template.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(f"Skipping unreadable manifest {path}: {exc}")
+            continue
+
+        manifests.append(
+            {
+                "scheme_id": payload.get("scheme_id"),
+                "scheme_name": payload.get("scheme_name"),
+                "rule_name": payload.get("rule_name"),
+                "manifest_version": payload.get("manifest_version"),
+                "path": str(path.relative_to(REPO_ROOT)).replace("\\", "/"),
+                "include_condition_count": len(payload.get("include_conditions") or []),
+                "exclude_condition_count": len(payload.get("exclude_conditions") or []),
+                "renewal_condition_count": len(payload.get("renewal_conditions") or []),
+            }
+        )
+
+    return manifests
+
+
+def load_fixed_manifest(scheme_id: str) -> Dict[str, Any]:
+    path = _fixed_manifest_path(scheme_id)
+    if not path.exists():
+        raise ValueError(f"Fixed manifest not found for scheme {scheme_id}.")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _parse_year_from_dob(member_dob: Any) -> Optional[int]:
+    raw = str(member_dob or "").strip()
+    if not raw:
+        return None
+    match = re.match(r"^(\d{4})", raw)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _derive_age(member_dob: Any, as_of: Optional[date] = None) -> Optional[int]:
+    raw = str(member_dob or "").strip()
+    if not raw:
+        return None
+    as_of = as_of or date.today()
+    try:
+        born = datetime.fromisoformat(raw[:10]).date()
+    except ValueError:
+        year = _parse_year_from_dob(raw)
+        if year is None:
+            return None
+        born = date(year, 1, 1)
+    age = as_of.year - born.year - ((as_of.month, as_of.day) < (born.month, born.day))
+    return max(age, 0)
+
+
+def _normalize_social_category(caste: Any) -> Optional[str]:
+    raw = _normalize_text(caste)
+    if not raw:
+        return None
+    if "DNT" in raw or "DENOTIFIED" in raw:
+        return "DNT"
+    if "EBC" in raw or "ECONOMICALLY BACKWARD" in raw:
+        return "EBC"
+    obc_tokens = ["OBC", "O.B.C", "OBC-A", "OBC-B", "OTHER BACKWARD"]
+    if any(token in raw for token in obc_tokens):
+        return "OBC"
+    return None
+
+
+async def fetch_registry_manifest_subjects(
+    session: AsyncSession,
+    target_scheme_id: str,
+    limit: int,
+    offset: int = 0,
+    district_code: Optional[int] = None,
+    enrolled_only: bool = False,
+) -> List[Dict[str, Any]]:
+    where_clause = ["1=1"]
+    params: Dict[str, Any] = {
+        "target_scheme_id": target_scheme_id,
+        "limit": limit,
+        "offset": offset,
+    }
+    if district_code is not None:
+        where_clause.append("pd.lgd_district_code = :district_code")
+        params["district_code"] = district_code
+    if enrolled_only:
+        where_clause.append("COALESCE(psr.is_enrolled_in_target, FALSE) = TRUE")
+
+    query = text(
+        f"""
+        WITH person_scheme_rollup AS (
+            SELECT
+                pd.ration_card_memberid,
+                ARRAY_REMOVE(ARRAY_AGG(DISTINCT pse.scheme_id), NULL) AS person_scheme_ids,
+                COALESCE(BOOL_OR(UPPER(BTRIM(pse.scheme_id)) = :target_scheme_id), FALSE) AS is_enrolled_in_target,
+                COUNT(*) FILTER (WHERE UPPER(BTRIM(pse.scheme_id)) = :target_scheme_id) AS target_scheme_enrollment_rows
+            FROM srsadmin.person_detail pd
+            LEFT JOIN srsadmin.person_scheme_enrollment pse
+                ON pse.ration_card_memberid = pd.ration_card_memberid
+            GROUP BY pd.ration_card_memberid
+        ),
+        family_rollup AS (
+            SELECT
+                pd.ration_card_number,
+                COUNT(*) AS family_member_count,
+                COUNT(*) FILTER (WHERE UPPER(BTRIM(pd.gender)) = 'MALE') AS male_family_member_count,
+                COUNT(*) FILTER (WHERE UPPER(BTRIM(pd.gender)) = 'FEMALE') AS female_family_member_count,
+                ARRAY_REMOVE(ARRAY_AGG(DISTINCT pse.scheme_id), NULL) AS family_scheme_ids,
+                COUNT(DISTINCT CASE WHEN UPPER(BTRIM(pse.scheme_id)) = :target_scheme_id THEN pd.ration_card_memberid END) AS family_members_enrolled_in_target
+            FROM srsadmin.person_detail pd
+            LEFT JOIN srsadmin.person_scheme_enrollment pse
+                ON pse.ration_card_memberid = pd.ration_card_memberid
+            GROUP BY pd.ration_card_number
+        )
+        SELECT
+            pd.*,
+            COALESCE(psr.person_scheme_ids, ARRAY[]::VARCHAR[]) AS person_scheme_ids,
+            COALESCE(psr.is_enrolled_in_target, FALSE) AS is_enrolled_in_target,
+            COALESCE(psr.target_scheme_enrollment_rows, 0) AS target_scheme_enrollment_rows,
+            COALESCE(fr.family_member_count, 0) AS family_member_count,
+            COALESCE(fr.male_family_member_count, 0) AS male_family_member_count,
+            COALESCE(fr.female_family_member_count, 0) AS female_family_member_count,
+            COALESCE(fr.family_scheme_ids, ARRAY[]::VARCHAR[]) AS family_scheme_ids,
+            COALESCE(fr.family_members_enrolled_in_target, 0) AS family_members_enrolled_in_target,
+            tpse.scheme_id AS target_scheme_id,
+            tpse.enrollment_status AS target_enrollment_status,
+            tpse.approved_date AS target_approved_date,
+            tpse.closing_date AS target_closing_date,
+            tpse.total_amount_received AS target_total_amount_received,
+            tpse.installment_count AS target_installment_count
+        FROM srsadmin.person_detail pd
+        LEFT JOIN person_scheme_rollup psr
+            ON psr.ration_card_memberid = pd.ration_card_memberid
+        LEFT JOIN family_rollup fr
+            ON fr.ration_card_number = pd.ration_card_number
+        LEFT JOIN srsadmin.person_scheme_enrollment tpse
+            ON tpse.ration_card_memberid = pd.ration_card_memberid
+           AND UPPER(BTRIM(tpse.scheme_id)) = :target_scheme_id
+        WHERE {" AND ".join(where_clause)}
+        ORDER BY pd.ration_card_memberid
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    result = await session.execute(query, params)
+    return [dict(row) for row in result.mappings().all()]
+
+
+def _direct_manifest_value(subject: Dict[str, Any], field_name: str) -> Any:
+    if field_name in subject:
+        return subject.get(field_name)
+    direct_aliases = {
+        "district_code": "lgd_district_code",
+        "block_code": "lgd_block_code",
+        "gp_code": "lgd_gp_code",
+        "fullname": "fullname",
+    }
+    alias = direct_aliases.get(field_name)
+    if alias:
+        return subject.get(alias)
+    return None
+
+
+def _resolve_manifest_field(
+    field_name: str,
+    subject: Dict[str, Any],
+    manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    direct_value = _direct_manifest_value(subject, field_name)
+    if direct_value not in (None, ""):
+        return {
+            "mapping_status": "direct_mapped",
+            "resolved_field": f"person_detail.{field_name}",
+            "sql_expression": f"pd.{field_name}",
+            "executable": True,
+            "value_found": direct_value,
+            "notes": None,
+        }
+
+    if field_name == "age":
+        return {
+            "mapping_status": "derived_mapped",
+            "resolved_field": "person_detail.member_dob",
+            "sql_expression": "AGE(CURRENT_DATE, pd.member_dob::date)",
+            "executable": True,
+            "value_found": _derive_age(subject.get("member_dob")),
+            "notes": "Derived from member_dob.",
+        }
+
+    if field_name in {"is_permanent_resident_of_west_bengal", "is_permanently_settled_in_awarding_state"}:
+        has_registry_presence = bool(subject.get("ration_card_number")) and bool(
+            subject.get("lgd_district_code")
+        )
+        return {
+            "mapping_status": "derived_mapped",
+            "resolved_field": "person_detail.lgd_district_code",
+            "sql_expression": "pd.lgd_district_code IS NOT NULL AND pd.ration_card_number IS NOT NULL",
+            "executable": True,
+            "value_found": has_registry_presence,
+            "notes": "Operational registry-residency proxy, not documentary domicile proof.",
+        }
+
+    if field_name == "citizenship":
+        has_registry_identity = bool(subject.get("uid")) or bool(subject.get("ration_card_memberid"))
+        return {
+            "mapping_status": "derived_mapped",
+            "resolved_field": "person_detail.uid",
+            "sql_expression": "CASE WHEN pd.uid IS NOT NULL OR pd.ration_card_memberid IS NOT NULL THEN 'INDIAN' END",
+            "executable": has_registry_identity,
+            "value_found": "INDIAN" if has_registry_identity else None,
+            "notes": "Operational registry identity proxy, not documentary nationality proof.",
+        }
+
+    if field_name == "social_category":
+        normalized = _normalize_social_category(subject.get("caste"))
+        return {
+            "mapping_status": "derived_mapped",
+            "resolved_field": "person_detail.caste",
+            "sql_expression": "normalized social category from pd.caste",
+            "executable": normalized is not None,
+            "value_found": normalized,
+            "notes": "Derived from caste text using a conservative normalization map.",
+        }
+
+    if field_name == "is_third_or_more_boy_sibling_claimant":
+        gender = _normalize_text(subject.get("gender"))
+        male_count = _to_int(subject.get("male_family_member_count")) or 0
+        if gender == "MALE":
+            return {
+                "mapping_status": "family_derived",
+                "resolved_field": "person_detail.gender + person_detail.ration_card_number",
+                "sql_expression": "male count within ration_card_number family",
+                "executable": True,
+                "value_found": male_count > 2,
+                "notes": "Derived from family male count; parent-guardian claimant ordering is approximated by family grouping.",
+            }
+        return {
+            "mapping_status": "family_derived",
+            "resolved_field": "person_detail.gender + person_detail.ration_card_number",
+            "sql_expression": "male count within ration_card_number family",
+            "executable": True,
+            "value_found": False,
+            "notes": "Restriction applies only to boys; girls are treated as not excluded by this condition.",
+        }
+
+    if field_name == "holds_other_scholarship_or_stipend":
+        person_scheme_ids = [str(x).upper() for x in (subject.get("person_scheme_ids") or []) if x]
+        target_scheme_id = str(manifest.get("scheme_id") or "").upper()
+        other_scheme_ids = [sid for sid in person_scheme_ids if sid != target_scheme_id]
+        scholarship_like = [sid for sid in other_scheme_ids if sid.startswith("C")]
+        return {
+            "mapping_status": "derived_mapped",
+            "resolved_field": "person_scheme_enrollment.scheme_id",
+            "sql_expression": "distinct scheme_ids per person excluding target scheme",
+            "executable": True,
+            "value_found": len(scholarship_like) > 0,
+            "notes": "Registry conflict proxy based on other scholarship-like scheme enrollments.",
+        }
+
+    if field_name == "is_enrolled_in_target_scheme":
+        return {
+            "mapping_status": "derived_mapped",
+            "resolved_field": "person_scheme_enrollment.scheme_id",
+            "sql_expression": "target scheme left join on ration_card_memberid",
+            "executable": True,
+            "value_found": bool(subject.get("is_enrolled_in_target")),
+            "notes": None,
+        }
+
+    return {
+        "mapping_status": "unmapped",
+        "resolved_field": None,
+        "sql_expression": None,
+        "executable": False,
+        "value_found": None,
+        "notes": "No reliable derivation is currently available from person_detail and person_scheme_enrollment.",
+    }
+
+
+def _manifest_condition_passes(actual: Any, operator: str, expected: Any) -> bool:
+    op = str(operator or "").strip().lower()
+    if op == "=":
+        if isinstance(expected, str):
+            return _normalize_text(actual) == _normalize_text(expected)
+        return actual == expected
+    if op == "in":
+        options = expected if isinstance(expected, list) else [expected]
+        normalized_options = {_normalize_text(v) for v in options}
+        return _normalize_text(actual) in normalized_options
+    if op in {">=", ">", "<=", "<"}:
+        if actual is None:
+            return False
+        if isinstance(expected, str) and isinstance(actual, str):
+            actual_norm = _normalize_text(actual)
+            expected_norm = _normalize_text(expected)
+            if op == ">=":
+                return actual_norm >= expected_norm
+            if op == ">":
+                return actual_norm > expected_norm
+            if op == "<=":
+                return actual_norm <= expected_norm
+            return actual_norm < expected_norm
+        try:
+            left = float(actual)
+            right = float(expected)
+        except (TypeError, ValueError):
+            return False
+        if op == ">=":
+            return left >= right
+        if op == ">":
+            return left > right
+        if op == "<=":
+            return left <= right
+        return left < right
+    return False
+
+
+def evaluate_manifest_subject(
+    subject: Dict[str, Any],
+    manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    subject_key = str(subject.get("ration_card_memberid") or "")
+    condition_results: List[Dict[str, Any]] = []
+    passed_condition_ids: List[str] = []
+    failed_condition_ids: List[str] = []
+    unresolved_condition_ids: List[str] = []
+
+    for group_name in ("include_conditions", "exclude_conditions", "renewal_conditions"):
+        for condition in manifest.get(group_name) or []:
+            field_name = str(condition.get("field") or "").strip()
+            resolution = _resolve_manifest_field(field_name, subject, manifest)
+            actual = resolution.get("value_found")
+            executable = bool(resolution.get("executable"))
+            passed: Optional[bool] = None
+            if executable:
+                matched = _manifest_condition_passes(actual, str(condition.get("operator") or ""), condition.get("value"))
+                passed = matched if group_name != "exclude_conditions" else (not matched)
+
+            result_row = {
+                "condition_id": condition.get("condition_id"),
+                "condition_group": group_name,
+                "field": field_name,
+                "mapping_status": resolution.get("mapping_status"),
+                "resolved_field": resolution.get("resolved_field"),
+                "sql_expression": resolution.get("sql_expression"),
+                "scope": condition.get("scope"),
+                "executable": executable,
+                "value_found": actual,
+                "expected_operator": condition.get("operator"),
+                "expected_value": condition.get("value"),
+                "condition_passed": passed,
+                "evidence": {
+                    "source_columns": [resolution.get("resolved_field")] if resolution.get("resolved_field") else [],
+                    "family_member_count": subject.get("family_member_count"),
+                    "person_scheme_ids": subject.get("person_scheme_ids"),
+                    "family_scheme_ids": subject.get("family_scheme_ids"),
+                },
+                "notes": resolution.get("notes"),
+            }
+            condition_results.append(_to_json_safe(result_row))
+
+            condition_id = str(condition.get("condition_id") or "")
+            if not executable:
+                unresolved_condition_ids.append(condition_id)
+            elif passed is True:
+                passed_condition_ids.append(condition_id)
+            else:
+                failed_condition_ids.append(condition_id)
+
+    is_enrolled = bool(subject.get("is_enrolled_in_target"))
+    if unresolved_condition_ids:
+        final_state = "REVIEW_REQUIRED"
+        is_eligible: Optional[bool] = None
+    else:
+        is_eligible = len(failed_condition_ids) == 0
+        if is_eligible and is_enrolled:
+            final_state = "ELIGIBLE_ENROLLED"
+        elif is_eligible and not is_enrolled:
+            final_state = "ELIGIBLE_NOT_ENROLLED"
+        elif (not is_eligible) and is_enrolled:
+            final_state = "NOT_ELIGIBLE_ENROLLED"
+        else:
+            final_state = "NOT_ELIGIBLE_NOT_ENROLLED"
+
+    return {
+        "subject": {
+            "subject_type": "person",
+            "ration_card_memberid": subject_key,
+            "ration_card_number": subject.get("ration_card_number"),
+            "district_code": subject.get("lgd_district_code"),
+            "fullname": subject.get("fullname"),
+        },
+        "condition_results": condition_results,
+        "enrollment_result": {
+            "target_scheme_id": manifest.get("scheme_id"),
+            "is_enrolled": is_enrolled,
+            "matched_enrollment_rows": subject.get("target_scheme_enrollment_rows") or 0,
+            "person_scheme_ids": _to_json_safe(subject.get("person_scheme_ids") or []),
+            "family_scheme_ids": _to_json_safe(subject.get("family_scheme_ids") or []),
+        },
+        "final_result": {
+            "is_eligible": is_eligible,
+            "eligibility_state": final_state,
+            "decision_bucket": final_state,
+            "passed_condition_ids": passed_condition_ids,
+            "failed_condition_ids": failed_condition_ids,
+            "unmapped_condition_ids": unresolved_condition_ids,
+        },
+    }
+
+
+async def run_fixed_manifest_evaluation(
+    session: AsyncSession,
+    manifest: Dict[str, Any],
+    limit: int = 500,
+    offset: int = 0,
+    district_code: Optional[int] = None,
+    enrolled_only: bool = False,
+) -> Dict[str, Any]:
+    scheme_id = str(manifest.get("scheme_id") or "").upper()
+    subjects = await fetch_registry_manifest_subjects(
+        session=session,
+        target_scheme_id=scheme_id,
+        limit=limit,
+        offset=offset,
+        district_code=district_code,
+        enrolled_only=enrolled_only,
+    )
+
+    run_id = f"eval_{datetime.now().strftime('%Y_%m_%d_%H%M%S')}_{uuid4().hex[:8]}"
+    subject_results = [evaluate_manifest_subject(subject, manifest) for subject in subjects]
+
+    bucket_counts = {
+        "ELIGIBLE_ENROLLED": 0,
+        "NOT_ELIGIBLE_ENROLLED": 0,
+        "ELIGIBLE_NOT_ENROLLED": 0,
+        "NOT_ELIGIBLE_NOT_ENROLLED": 0,
+        "REVIEW_REQUIRED": 0,
+    }
+    mapping_status_counts = {
+        "direct_mapped": 0,
+        "derived_mapped": 0,
+        "family_derived": 0,
+        "unmapped": 0,
+    }
+    preview: List[Dict[str, Any]] = []
+
+    for item in subject_results:
+        final_state = str(item["final_result"]["eligibility_state"])
+        bucket_counts[final_state] = bucket_counts.get(final_state, 0) + 1
+        for condition in item["condition_results"]:
+            mapping_key = str(condition.get("mapping_status") or "unmapped")
+            mapping_status_counts[mapping_key] = mapping_status_counts.get(mapping_key, 0) + 1
+        if len(preview) < 25:
+            preview.append(
+                {
+                    "ration_card_memberid": item["subject"]["ration_card_memberid"],
+                    "fullname": item["subject"].get("fullname"),
+                    "district_code": item["subject"].get("district_code"),
+                    "decision_bucket": final_state,
+                    "is_enrolled": item["enrollment_result"]["is_enrolled"],
+                    "is_eligible": item["final_result"]["is_eligible"],
+                    "passed_condition_ids": item["final_result"]["passed_condition_ids"],
+                    "failed_condition_ids": item["final_result"]["failed_condition_ids"],
+                    "unmapped_condition_ids": item["final_result"]["unmapped_condition_ids"],
+                }
+            )
+
+    artifact = {
+        "evaluation_run_id": run_id,
+        "evaluated_at": datetime.now().astimezone().isoformat(),
+        "scheme_id": scheme_id,
+        "manifest_ref": {
+            "path": str(_fixed_manifest_path(scheme_id).relative_to(REPO_ROOT)).replace("\\", "/"),
+            "manifest_version": manifest.get("manifest_version"),
+        },
+        "run_config": {
+            "limit": limit,
+            "offset": offset,
+            "district_code": district_code,
+            "enrolled_only": enrolled_only,
+        },
+        "sources_used": [
+            "srsadmin.person_detail",
+            "srsadmin.person_scheme_enrollment",
+        ],
+        "summary": {
+            "evaluated_subjects": len(subject_results),
+            "bucket_counts": bucket_counts,
+            "mapping_status_counts": mapping_status_counts,
+        },
+        "subjects": _to_json_safe(subject_results),
+    }
+
+    artifact_path = EVALUATED_MANIFEST_DIR / f"{run_id}_{scheme_id}.json"
+    artifact_path.write_text(json.dumps(_to_json_safe(artifact), indent=2), encoding="utf-8")
+
+    return {
+        "evaluation_run_id": run_id,
+        "scheme_id": scheme_id,
+        "artifact_path": str(artifact_path.relative_to(REPO_ROOT)).replace("\\", "/"),
+        "evaluated": len(subject_results),
+        "bucket_counts": bucket_counts,
+        "mapping_status_counts": mapping_status_counts,
+        "preview": preview,
+        "evaluation_basis": {
+            "message": (
+                "Eligibility was evaluated from fixed policy manifests against normalized registry tables with person-level joins, family rollups, and derived mapping-status resolution."
+            ),
+            "district_code": district_code,
+            "enrolled_only": enrolled_only,
+            "no_population_found": len(subject_results) == 0,
+            "no_population_reason": (
+                f"No registry subjects found for scheme {scheme_id} with the current filters."
+                if len(subject_results) == 0
+                else None
+            ),
+        },
     }

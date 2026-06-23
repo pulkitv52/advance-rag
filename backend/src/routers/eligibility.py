@@ -184,6 +184,56 @@ class DecisionManualInputRequest(BaseModel):
     scheme_only: bool = True
 
 
+class FixedManifestEvaluationRequest(BaseModel):
+    limit: int = 500
+    offset: int = 0
+    district_code: Optional[int] = None
+    enrolled_only: bool = False
+
+
+@router.get("/fixed-manifests")
+async def list_fixed_manifests():
+    try:
+        manifests = eligibility.list_fixed_manifests()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load fixed manifests: {exc}") from exc
+    return {"total": len(manifests), "manifests": manifests}
+
+
+@router.get("/fixed-manifests/{scheme_id}")
+async def get_fixed_manifest(scheme_id: str):
+    try:
+        return eligibility.load_fixed_manifest(scheme_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load fixed manifest: {exc}") from exc
+
+
+@router.post("/fixed-manifests/{scheme_id}/evaluate")
+async def evaluate_fixed_manifest(
+    scheme_id: str,
+    request: FixedManifestEvaluationRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    try:
+        manifest = eligibility.load_fixed_manifest(scheme_id)
+        summary = await eligibility.run_fixed_manifest_evaluation(
+            session=session,
+            manifest=manifest,
+            limit=request.limit,
+            offset=request.offset,
+            district_code=request.district_code,
+            enrolled_only=request.enrolled_only,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Fixed manifest evaluation failed: {exc}") from exc
+
+    return summary
+
+
 @router.post("/rules/extract/{document_id}")
 async def extract_rule_from_uploaded_document(
     document_id: str,

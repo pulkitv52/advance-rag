@@ -799,7 +799,7 @@ async def run_full_intelligence_batch() -> Dict[str, Any]:
     adv_total = sum(len(v) for v in advanced.values())
 
     # Step 9: Persist Intelligence Edges (NEW: Dashboard Population)
-    await persist_fraud_results({**ghosts, **duplicates, **anomalies})
+    await persist_fraud_results({**ghosts, **duplicates, **anomalies, **advanced})
     await persist_operator_anomalies(operators)
 
     summary = {

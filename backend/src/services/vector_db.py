@@ -23,7 +23,7 @@ _client: Optional[AsyncQdrantClient] = None
 def _extract_scheme_id_from_filename(filename: str) -> Optional[str]:
     if not filename:
         return None
-    match = re.search(r"\b([A-Z]\d{3,5})\b", filename.upper())
+    match = re.search(r"([A-Z]\d{3,5})", filename.upper())
     if match:
         return match.group(1)
     return None
@@ -36,7 +36,7 @@ def get_qdrant_client() -> AsyncQdrantClient:
             host=settings.QDRANT_HOST,
             port=settings.QDRANT_PORT,
             grpc_port=settings.QDRANT_GRPC_PORT,
-            prefer_grpc=True,
+            prefer_grpc=False,
         )
     return _client
 

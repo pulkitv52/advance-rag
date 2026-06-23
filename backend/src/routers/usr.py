@@ -51,16 +51,42 @@ async def run_neo4j_query(query: str, params: dict = {}):
 @router.get("/stats")
 async def get_summary_stats():
     """Returns top-level KPI stats from cached summaries, with a live graph fallback."""
+    flagged_case_rows = await run_neo4j_query("""
+        CALL {
+            MATCH (c:Citizen)-[:FLAGGED_AS]->(:FraudFlag)
+            RETURN count(DISTINCT c.uid) AS citizen_cases
+        }
+        CALL {
+            MATCH (o:Operator)-[:FLAGGED_AS]->(:FraudFlag)
+            RETURN count(DISTINCT o.id) AS operator_cases
+        }
+        CALL {
+            MATCH (rc:RationCard)-[:FLAGGED_AS]->(:FraudFlag)
+            RETURN count(DISTINCT rc.number) AS household_cases
+        }
+        RETURN citizen_cases + operator_cases + household_cases AS total
+    """)
+    flagged_review_cases = int(flagged_case_rows[0].get("total", 0)) if flagged_case_rows else 0
+
     stats = await run_neo4j_query("""
         MATCH (s:GlobalStats {id: 'USR_HUB'})
         MATCH (c:Citizen)
-        WITH s, count(c) AS current_graph_count
+        WITH
+            s,
+            count(c) AS current_graph_count,
+            round(coalesce(avg(c.vulnerability_score), 0) * 100) / 100 AS live_avg_vulnerability,
+            count(CASE WHEN c.risk_tier = 'CRITICAL' OR coalesce(c.vulnerability_score, 0) >= 80 THEN 1 END) AS live_critical_count,
+            count(CASE WHEN c.risk_tier IN ['HIGH', 'CRITICAL'] OR coalesce(c.vulnerability_score, 0) >= 60 THEN 1 END) AS live_high_risk_count,
+            count(CASE WHEN toLower(coalesce(c.gender, '')) = 'female' THEN 1 END) AS live_female_count,
+            count(CASE WHEN c.risk_tier = 'CRITICAL' THEN 1 END) AS live_critical_tier_count
         RETURN 
             s.total_citizens AS persisted_total,
             current_graph_count AS live_graph_total,
-            s.avg_vulnerability AS avg_vulnerability,
-            s.critical_count AS critical_count,
-            s.high_risk_count AS high_risk_count,
+            live_avg_vulnerability AS avg_vulnerability,
+            live_critical_count AS critical_count,
+            live_high_risk_count AS high_risk_count,
+            live_female_count AS female_count,
+            live_critical_tier_count AS critical_tier_count,
             s.last_updated AS last_updated,
             2234522 AS physical_registry_total
     """)
@@ -85,6 +111,7 @@ async def get_summary_stats():
                 "total_citizens": current["total_citizens"],
                 "avg_vulnerability": current["avg_vulnerability"],
                 "critical_count": current["critical_count"],
+                "flagged_review_cases": flagged_review_cases,
                 "high_risk_count": current["high_risk_count"],
                 "last_updated": None,
                 "registry_total": registry_total,
@@ -96,6 +123,7 @@ async def get_summary_stats():
             "total_citizens": 0,
             "avg_vulnerability": 0,
             "critical_count": 0,
+            "flagged_review_cases": flagged_review_cases,
             "high_risk_count": 0,
             "last_updated": None,
             "registry_total": 2234522,
@@ -111,10 +139,13 @@ async def get_summary_stats():
         "total_citizens": data["live_graph_total"],
         "avg_vulnerability": data["avg_vulnerability"],
         "critical_count": data["critical_count"],
+        "flagged_review_cases": flagged_review_cases,
         "high_risk_count": data["high_risk_count"],
         "last_updated": data["last_updated"],
         "registry_total": data["physical_registry_total"],
         "coverage_pct": round(coverage, 1),
+        "female_count": data["female_count"],
+        "critical_tier_count": data["critical_tier_count"],
     }
 
 
@@ -263,7 +294,7 @@ async def get_intelligence_feed(
     Consolidates Ghosts, Duplicates, and Anomalies into a single stream.
     """
     # Keep page sizes conservative to avoid large in-memory UNION+ORDER BY workloads.
-    safe_limit = max(1, min(limit, 50))
+    safe_limit = max(1, min(limit, 10000))
     safe_offset = max(0, offset)
 
     total: int | None = None
@@ -294,7 +325,8 @@ async def get_intelligence_feed(
         CALL {
             MATCH (c:Citizen)-[rel:FLAGGED_AS]->(f:FraudFlag)
             OPTIONAL MATCH (c)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
-            WITH c, rel, f, head(collect(DISTINCT d.name)) AS district_name
+            OPTIONAL MATCH (c)-[:ENROLLED_IN]->(s:Scheme)
+            WITH c, rel, f, head(collect(DISTINCT d.name)) AS district_name, collect(distinct s.id) as schemes
             RETURN
                 f.rule AS rule,
                 coalesce(f.label, f.rule) AS label,
@@ -306,7 +338,8 @@ async def get_intelligence_feed(
                 coalesce(c.gp_name, 'Unknown') AS gp_name,
                 coalesce(district_name, 'Unknown') AS district,
                 coalesce(rel.confidence, 0) AS confidence,
-                toString(rel.detected_at) AS detected_at
+                toString(rel.detected_at) AS detected_at,
+                coalesce(schemes[0], 'N/A') AS scheme
             UNION ALL
             MATCH (o:Operator)-[rel:FLAGGED_AS]->(f:FraudFlag)
             RETURN
@@ -320,7 +353,8 @@ async def get_intelligence_feed(
                 'N/A' AS gp_name,
                 'N/A' AS district,
                 coalesce(rel.confidence, 0) AS confidence,
-                toString(rel.detected_at) AS detected_at
+                toString(rel.detected_at) AS detected_at,
+                'N/A' AS scheme
             UNION ALL
             MATCH (rc:RationCard)-[rel:FLAGGED_AS]->(f:FraudFlag)
             RETURN
@@ -334,42 +368,47 @@ async def get_intelligence_feed(
                 'N/A' AS gp_name,
                 'N/A' AS district,
                 coalesce(rel.confidence, 0) AS confidence,
-                toString(rel.detected_at) AS detected_at
+                toString(rel.detected_at) AS detected_at,
+                'N/A' AS scheme
             UNION ALL
             MATCH (c1:Citizen)-[rel:POTENTIAL_DUPLICATE]->(c2:Citizen)
             OPTIONAL MATCH (c1)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
-            WITH c1, c2, rel, head(collect(DISTINCT d.name)) AS district_name
+            OPTIONAL MATCH (c1)-[:ENROLLED_IN]->(s:Scheme)
+            WITH c1, c2, rel, head(collect(DISTINCT d.name)) AS district_name, collect(distinct s.id) as schemes
             RETURN
                 coalesce(rel.rule, 'B1') AS rule,
                 coalesce(rel.rule, 'B1') AS label,
                 'DUPLICATE' AS type,
-                ('Potential duplicate with ' + coalesce(c2.uid, 'unknown UID')) AS description,
+                ('Potential duplicate with ' + coalesce(c2.name, 'Unknown') + ' (UID: ' + coalesce(c2.uid, 'N/A') + ')') AS description,
                 c1.name AS name,
                 c1.uid AS uid,
                 coalesce(c1.dob, 'Unknown') AS dob,
                 coalesce(c1.gp_name, 'Unknown') AS gp_name,
                 coalesce(district_name, 'Unknown') AS district,
                 coalesce(rel.confidence, 85) AS confidence,
-                toString(rel.detected_at) AS detected_at
+                toString(rel.detected_at) AS detected_at,
+                coalesce(schemes[0], 'N/A') AS scheme
             UNION ALL
             MATCH (c1:Citizen)-[rel:SAME_DOB_AT_GP]->(c2:Citizen)
             OPTIONAL MATCH (c1)-[:RESIDES_IN]->(:GP)-[:PART_OF]->(:Block)-[:PART_OF]->(d:District)
-            WITH c1, c2, rel, head(collect(DISTINCT d.name)) AS district_name
+            OPTIONAL MATCH (c1)-[:ENROLLED_IN]->(s:Scheme)
+            WITH c1, c2, rel, head(collect(DISTINCT d.name)) AS district_name, collect(distinct s.id) as schemes
             RETURN
                 coalesce(rel.rule, 'B3') AS rule,
                 coalesce(rel.rule, 'B3') AS label,
                 'DUPLICATE' AS type,
-                ('Same DOB at GP as ' + coalesce(c2.uid, 'unknown UID')) AS description,
+                ('Same DOB at GP as ' + coalesce(c2.name, 'Unknown') + ' (UID: ' + coalesce(c2.uid, 'N/A') + ')') AS description,
                 c1.name AS name,
                 c1.uid AS uid,
                 coalesce(c1.dob, 'Unknown') AS dob,
                 coalesce(c1.gp_name, 'Unknown') AS gp_name,
                 coalesce(district_name, 'Unknown') AS district,
                 coalesce(rel.confidence, 80) AS confidence,
-                toString(rel.detected_at) AS detected_at
+                toString(rel.detected_at) AS detected_at,
+                coalesce(schemes[0], 'N/A') AS scheme
         }
         RETURN
-            rule, label, type, description, name, uid, dob, gp_name, district, confidence, detected_at
+            rule, label, type, description, name, uid, dob, gp_name, district, confidence, detected_at, scheme
         ORDER BY confidence DESC, detected_at DESC
         SKIP $offset
         LIMIT $limit
@@ -526,7 +565,8 @@ async def get_field_audit_queue(
         MATCH (c:Citizen)-[f:FLAGGED_AS]->(fl:FraudFlag)
         WHERE ($rules_count = 0 OR toUpper(coalesce(fl.rule, '')) IN $rules)
         OPTIONAL MATCH (c)-[:RESIDES_IN]->(g:GP)-[:PART_OF]->(b:Block)-[:PART_OF]->(d:District)
-        WITH c, g, b, d, f, fl
+        OPTIONAL MATCH (c)-[:ENROLLED_IN]->(s:Scheme)
+        WITH c, g, b, d, f, fl, s
         WHERE ($district = '' OR coalesce(d.name, '') = $district)
           AND ($mauza = '' OR coalesce(b.name, '') = $mauza)
         WITH
@@ -536,7 +576,8 @@ async def get_field_audit_queue(
             head(collect(DISTINCT d.name)) AS district_name,
             count(DISTINCT f) as flags,
             collect(DISTINCT fl.description) as flag_notes,
-            collect(DISTINCT toUpper(coalesce(fl.rule, 'UNKNOWN'))) as rule_codes
+            collect(DISTINCT toUpper(coalesce(fl.rule, 'UNKNOWN'))) as rule_codes,
+            collect(distinct s.id) as schemes
         RETURN
             c.name          AS name,
             c.uid           AS uid,
@@ -548,7 +589,8 @@ async def get_field_audit_queue(
             gp_name         AS gp,
             flags,
             rule_codes,
-            flag_notes
+            flag_notes,
+            coalesce(schemes[0], 'N/A') AS scheme
         ORDER BY flags DESC, c.vulnerability_score DESC
         LIMIT $limit
     """, {
@@ -611,10 +653,10 @@ async def get_intelligence_filters():
 async def get_audit_rules():
     """Returns canonical + detected fraud rule codes for export filtering."""
     canonical_rules = [
-        "A1", "A2",
+        "A1", "A2", "A3",
         "B1", "B2", "B3",
         "C1", "C2",
-        "D1",
+        "D1", "D2", "D3",
         "E1",
         "F1",
         "G1",

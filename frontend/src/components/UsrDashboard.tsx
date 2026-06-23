@@ -38,6 +38,7 @@ interface UsrStats {
   total_citizens: number;
   avg_vulnerability: number;
   critical_count: number;
+  flagged_review_cases?: number;
   high_risk_count: number;
   last_updated: string | null;
   registry_total?: number;
@@ -118,6 +119,8 @@ interface UsrAuditCase {
   gp: string
   flags: number
   flag_notes: string[]
+  rule_codes?: string[]
+  scheme?: string
 }
 
 interface DistrictMauzaPair {
@@ -130,12 +133,40 @@ interface UsrRulesEF {
   rule_f: any[]
 }
 
+interface UsrQueueDisplayItem extends UsrFraudFlag {
+  source: 'intelligence' | 'audit_queue'
+  score?: number
+  flags?: number
+  district?: string
+  block?: string
+  auditCase?: UsrAuditCase
+}
 
+
+
+const ruleLabels: Record<string, string> = {
+  "A1": "A1 - Ghost Beneficiary (Demographics)",
+  "A2": "A2 - Ghost Beneficiary (Identity Mismatch)",
+  "A3": "A3 - Ghost Beneficiary (Child in Adult Scheme)",
+  "B1": "B1 - Duplicate Identity (High Similarity)",
+  "B2": "B2 - Duplicate Identity (Cross-record Mismatch)",
+  "B3": "B3 - Duplicate Identity (Same DOB at GP)",
+  "C1": "C1 - Scheme Anomaly (Concentration Spike)",
+  "C2": "C2 - Scheme Anomaly (Exclusive Overlap)",
+  "D1": "D1 - Data Quality (Null/Invalid Field)",
+  "D2": "D2 - Data Quality (Gender/Schema Anomaly)",
+  "D3": "D3 - Data Quality (Future DOB Anomaly)",
+  "E1": "E1 - Household Ring (Overload)",
+  "F1": "F1 - Operator Anomaly (Registration Conc.)",
+  "G1": "G1 - Network Anomaly (Graph Outlier)",
+  "H1": "H1 - Internal Integrity (Pattern Deviation)",
+  "I1": "I1 - Internal Integrity (Risk Correlation)"
+}
 
 export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
-  const INTEL_PAGE_SIZE = 50
+  const INTEL_PAGE_SIZE = 5000
   const [usrStats, setUsrStats] = useState<UsrStats | null>(null)
-  const [usrTopRisk, setUsrTopRisk] = useState<Record<string, UsrCitizen[]>>({
+  const [_usrTopRisk, setUsrTopRisk] = useState<Record<string, UsrCitizen[]>>({
     all: [],
     elderly: [],
     children: [],
@@ -161,8 +192,9 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
   const [globalRiskFilter, setGlobalRiskFilter] = useState('ALL')
   const [globalDateRange, setGlobalDateRange] = useState('ALL')
   const [globalQuerySearch, setGlobalQuerySearch] = useState('')
+  const [globalRuleFilter, setGlobalRuleFilter] = useState('ALL')
   const [intelSortBy, setIntelSortBy] = useState<'confidence' | 'detected_at'>('confidence')
-  const [intelSortDir, setIntelSortDir] = useState<'asc' | 'desc'>('desc')
+  const [intelSortDir, _setIntelSortDir] = useState<'asc' | 'desc'>('desc')
   const [intelPage, setIntelPage] = useState(1)
   const [selectedIntelItem, setSelectedIntelItem] = useState<any | null>(null)
   const [intelExplainOpen, setIntelExplainOpen] = useState(false)
@@ -187,8 +219,8 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
   const [auditLoading, setAuditLoading] = useState(false)
   const [showAuditModal, setShowAuditModal] = useState(false)
   const [showOperatorAudit, setShowOperatorAudit] = useState(false)
-  const [segmentFilter, setSegmentFilter] = useState('all')
-  const [showAllCitizens, setShowAllCitizens] = useState(false)
+  const [syncStatus, setSyncStatus] = useState<string | null>(null)
+  const [activeQueueTab, setActiveQueueTab] = useState<'individual' | 'household' | 'operator'>('individual')
   const usrRequestInFlightRef = useRef(false)
   const usrHasLoadedRef = useRef(false)
   const heatmapContainerRef = useRef<HTMLDivElement | null>(null)
@@ -236,6 +268,52 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     }
   }
 
+  const applyUsrCoreResults = (
+    statsRes: PromiseSettledResult<any>,
+    topRiskAll: PromiseSettledResult<any>,
+    topRiskElderly: PromiseSettledResult<any>,
+    topRiskChildren: PromiseSettledResult<any>,
+    topRiskWorkers: PromiseSettledResult<any>,
+    heatmapRes: PromiseSettledResult<any>,
+  ) => {
+    if (statsRes.status === 'fulfilled') {
+      setUsrStats(statsRes.value.data)
+    }
+
+    const nextTopRisk: Record<string, UsrCitizen[]> = {}
+    if (topRiskAll.status === 'fulfilled') {
+      nextTopRisk.all = topRiskAll.value.data.citizens || []
+    }
+    if (topRiskElderly.status === 'fulfilled') {
+      nextTopRisk.elderly = topRiskElderly.value.data.citizens || []
+    }
+    if (topRiskChildren.status === 'fulfilled') {
+      nextTopRisk.children = topRiskChildren.value.data.citizens || []
+    }
+    if (topRiskWorkers.status === 'fulfilled') {
+      nextTopRisk.workers = topRiskWorkers.value.data.citizens || []
+    }
+    if (Object.keys(nextTopRisk).length > 0) {
+      setUsrTopRisk((current) => ({ ...current, ...nextTopRisk }))
+    }
+
+    if (heatmapRes.status === 'fulfilled') {
+      setUsrHeatmap(heatmapRes.value.data.districts || [])
+    }
+  }
+
+  const countRejectedResults = (results: PromiseSettledResult<any>[]) =>
+    results.filter((result) => result.status === 'rejected').length
+
+  const fetchUsrCoreData = () => Promise.allSettled([
+    axios.get(`${API}/api/usr/stats`),
+    axios.get(`${API}/api/usr/top-risk?limit=50`),
+    axios.get(`${API}/api/usr/top-risk?limit=50&segment=elderly`),
+    axios.get(`${API}/api/usr/top-risk?limit=50&segment=children`),
+    axios.get(`${API}/api/usr/top-risk?limit=50&segment=workers`),
+    axios.get(`${API}/api/usr/heatmap`),
+  ])
+
   const fetchUsrDashboard = async (force = false) => {
     if (usrRequestInFlightRef.current) return
     if (usrHasLoadedRef.current && !force) return
@@ -245,31 +323,24 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     setUsrError(null)
 
     try {
-      const [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes] = await Promise.allSettled([
-        axios.get(`${API}/api/usr/stats`),
-        axios.get(`${API}/api/usr/top-risk?limit=50`),
-        axios.get(`${API}/api/usr/top-risk?limit=50&segment=elderly`),
-        axios.get(`${API}/api/usr/top-risk?limit=50&segment=children`),
-        axios.get(`${API}/api/usr/top-risk?limit=50&segment=workers`),
-        axios.get(`${API}/api/usr/heatmap`),
-      ])
+      let [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes] = await fetchUsrCoreData()
+      applyUsrCoreResults(statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes)
 
-      if (statsRes.status === 'fulfilled') {
-        setUsrStats(statsRes.value.data)
-      }
-      setUsrTopRisk({
-        all: topRiskAll.status === 'fulfilled' ? (topRiskAll.value.data.citizens || []) : [],
-        elderly: topRiskElderly.status === 'fulfilled' ? (topRiskElderly.value.data.citizens || []) : [],
-        children: topRiskChildren.status === 'fulfilled' ? (topRiskChildren.value.data.citizens || []) : [],
-        workers: topRiskWorkers.status === 'fulfilled' ? (topRiskWorkers.value.data.citizens || []) : []
-      })
-      setUsrHeatmap(heatmapRes.status === 'fulfilled' ? (heatmapRes.value.data.districts || []) : [])
-
-      const coreFailures = [statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes]
-        .filter((r) => r.status === 'rejected').length
+      const coreFailures = countRejectedResults([statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes])
       if (coreFailures === 6) {
-        setUsrError('Failed to load Social Registry dashboard data.')
-        return
+        await new Promise((resolve) => window.setTimeout(resolve, 700))
+        ;[statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes] = await fetchUsrCoreData()
+        applyUsrCoreResults(statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes)
+
+        const retryFailures = countRejectedResults([statsRes, topRiskAll, topRiskElderly, topRiskChildren, topRiskWorkers, heatmapRes])
+        if (retryFailures === 6) {
+          setUsrError(
+            usrHasLoadedRef.current || !!usrStats
+              ? 'Live refresh could not reach Social Registry services. Showing the last loaded data.'
+              : 'Social Registry data is temporarily unreachable. Try Reload Dashboard Data once, or restart the backend if the issue continues.'
+          )
+          return
+        }
       }
       usrHasLoadedRef.current = true
     } finally {
@@ -406,34 +477,24 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
   }
 
   const runUsrBatch = async (type: 'batch' | 'sync') => {
+    setSyncStatus(type === 'sync' ? 'Synchronizing registry database into Knowledge Graph...' : 'Running rules scan batch across graph nodes...')
     try {
       const url = type === 'sync'
         ? `${API}/api/usr/run-sync?limit=50000`
         : `${API}/api/usr/run-batch`
-      await axios.post(url)
-    } catch {
-      // Error handling
+      const res = await axios.post(url)
+      setSyncStatus(`${type === 'sync' ? 'Synchronization' : 'Analysis'} task successfully started: ${res.data.message || 'Check logs for progress.'}`)
+      setTimeout(() => {
+        setSyncStatus(null)
+        fetchUsrDashboard(true)
+      }, 6000)
+    } catch (err: any) {
+      setSyncStatus(`Error: ${getErrorMessage(err, `Failed to trigger ${type}.`)}`)
+      setTimeout(() => setSyncStatus(null), 8000)
     }
   }
 
   // --- Helper Functions ---
-  const getRiskColor = (score: number) => {
-    if (score >= 61) return '#ef4444'
-    if (score >= 41) return '#f97316'
-    if (score >= 21) return '#f59e0b'
-    return '#10b981'
-  }
-
-  const getRiskTierBadge = (tier: string) => {
-    const map: Record<string, { color: string, bg: string }> = {
-      'CRITICAL': { color: '#ef4444', bg: 'rgba(239,68,68,0.1)' },
-      'HIGH':     { color: '#f97316', bg: 'rgba(249,115,22,0.1)' },
-      'MODERATE': { color: '#f59e0b', bg: 'rgba(245,158,11,0.1)' },
-      'LOW':      { color: '#10b981', bg: 'rgba(16,185,129,0.1)' },
-    }
-    return map[tier] || map['LOW']
-  }
-
   const getWhyExplanation = (flag: UsrFraudFlag) => {
     if (flag.rule === 'A1') return "Identified as a 'Ghost' because the age provided (105+) is physically unlikely for the region."
     if (flag.rule === 'B1') return "Potential Duplicate: This person shares an identical Name and Date of Birth with another record, suggesting a double-enrollment."
@@ -441,37 +502,51 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     if (flag.rule === 'E1') return "Household Overload: Too many citizens are linked to a single Ration Card hub (Synthetic Household)."
     return (flag as any).label || flag.rule || "Pattern anomaly detected by the Intelligence Engine."
   }
+  const fallbackAuditQueueFeed: UsrQueueDisplayItem[] = usrAuditQueue.map((item) => {
+    const primaryRule = item.rule_codes?.[0] || 'AUDIT'
+    const synthesizedConfidence = Math.max(70, Math.min(99, Number(item.score || item.flags * 18 || 0)))
 
-  const calculateAge = (dob: string) => {
-    if (!dob) return 0
-    try {
-      const birth = new Date(dob)
-      const now = new Date()
-      return now.getFullYear() - birth.getFullYear()
-    } catch { return 0 }
-  }
-
-  const filteredCitizens = usrTopRisk[segmentFilter] || []
-
-  const visibleCitizens = showAllCitizens ? filteredCitizens : filteredCitizens.slice(0, 10)
-  const intelligenceFeedCount = usrIntelligenceFeed.length + usrRulesEF.rule_e.length + usrRulesEF.rule_f.length
+    return {
+      id: `audit-${item.uid}-${primaryRule}-${item.flags}`,
+      source: 'audit_queue',
+      name: item.name,
+      uid: item.uid,
+      dob: item.dob,
+      gp_name: item.gp,
+      district: item.district,
+      confidence: synthesizedConfidence,
+      rule: primaryRule,
+      label: item.rule_codes?.length ? item.rule_codes.join(', ') : 'Priority Queue Case',
+      type: 'AUDIT_QUEUE',
+      description: item.flag_notes?.[0] || `${item.flags} linked fraud signals require field verification.`,
+      score: item.score,
+      flags: item.flags,
+      block: item.block,
+      auditCase: item,
+      scheme: item.scheme,
+    }
+  })
+  const baseIndividualFeed: UsrQueueDisplayItem[] = usrIntelligenceFeed.length > 0
+    ? usrIntelligenceFeed.map((item: UsrFraudFlag) => ({ ...item, source: 'intelligence' as const }))
+    : fallbackAuditQueueFeed
+  const intelligenceFeedCount = baseIndividualFeed.length + usrRulesEF.rule_e.length + usrRulesEF.rule_f.length
   const intelPageSize = 8
 
   const schemeOptions = Array.from(
     new Set(
-      usrIntelligenceFeed
+      baseIndividualFeed
         .map((f: any) => String(f?.scheme || '').trim())
         .filter((v: string) => Boolean(v) && v.toUpperCase() !== 'UNKNOWN' && v.toUpperCase() !== 'N/A')
     )
   ).sort()
   const districtOptions = Array.from(
     new Set(
-      usrIntelligenceFeed
-        .map((f: any) => String(f?.district || f?.gp_name || '').trim())
+      baseIndividualFeed
+        .map((f: any) => String(f?.district || f?.gp_name || f?.block || '').trim())
         .filter((v: string) => Boolean(v) && v.toUpperCase() !== 'UNKNOWN' && v.toUpperCase() !== 'N/A')
     )
   ).sort()
-  const hasDetectedAtData = usrIntelligenceFeed.some((f: any) => Boolean(f?.detected_at))
+  const hasDetectedAtData = baseIndividualFeed.some((f: any) => Boolean(f?.detected_at))
 
   const presetFilter = (preset: 'review' | 'high' | 'recent' | 'issues') => {
     if (preset === 'review') {
@@ -489,12 +564,13 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     setIntelPage(1)
   }
 
-  const filteredIntelFeed = usrIntelligenceFeed
+  const filteredIntelFeed = baseIndividualFeed
     .filter((row: any) => {
       if (globalSchemeFilter !== 'ALL' && String(row?.scheme || '') !== globalSchemeFilter) return false
-      if (globalDistrictFilter !== 'ALL' && String(row?.district || row?.gp_name || '') !== globalDistrictFilter) return false
+      if (globalDistrictFilter !== 'ALL' && String(row?.district || row?.gp_name || row?.block || '') !== globalDistrictFilter) return false
       if (globalRiskFilter === 'HIGH' && Number(row?.confidence || 0) < 85) return false
       if (globalRiskFilter === 'REVIEW_PENDING' && row?.latest_review) return false
+      if (globalRuleFilter !== 'ALL' && String(row?.rule || '').trim().toUpperCase() !== globalRuleFilter.toUpperCase()) return false
       if (globalDateRange !== 'ALL') {
         const detected = row?.detected_at ? new Date(row.detected_at).getTime() : 0
         if (detected) {
@@ -524,13 +600,35 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
 
   const totalIntelPages = Math.max(1, Math.ceil(filteredIntelFeed.length / intelPageSize))
   const pagedIntelFeed = filteredIntelFeed.slice((intelPage - 1) * intelPageSize, intelPage * intelPageSize)
-  const pdfRuleOptions = (auditRuleOptions.length > 0 ? auditRuleOptions : Array.from(
-    new Set(
-      usrIntelligenceFeed
-        .map((f: any) => String(f?.rule || '').trim().toUpperCase())
-        .filter(Boolean)
-    )
-  ).sort())
+  const individualQueueTotal = baseIndividualFeed.length
+  const householdQueueTotal = usrRulesEF.rule_e.length
+  const operatorQueueTotal = usrRulesEF.rule_f.length
+  const queueTabs = [
+    { id: 'individual' as const, label: 'Flagged Citizens', count: individualQueueTotal },
+    { id: 'household' as const, label: 'Suspicious Households', count: householdQueueTotal },
+    { id: 'operator' as const, label: 'Suspicious Operators', count: operatorQueueTotal },
+  ]
+  const actionableQueueTabs = queueTabs.filter((tab) => tab.count > 0)
+  const activeQueueTotal = individualQueueTotal + householdQueueTotal + operatorQueueTotal
+
+  useEffect(() => {
+    if (actionableQueueTabs.length === 0) {
+      if (activeQueueTab !== 'individual') setActiveQueueTab('individual')
+      return
+    }
+
+    if (!actionableQueueTabs.some((tab) => tab.id === activeQueueTab)) {
+      setActiveQueueTab(actionableQueueTabs[0].id)
+    }
+  }, [actionableQueueTabs, activeQueueTab])
+
+  const pdfRuleOptions = Array.from(
+    new Set([
+      ...Object.keys(ruleLabels),
+      ...auditRuleOptions,
+      ...usrIntelligenceFeed.map((f: any) => String(f?.rule || '').trim().toUpperCase()).filter(Boolean)
+    ])
+  ).sort()
   const pdfDistrictOptions = (auditDistrictOptions.length > 0 ? auditDistrictOptions : Array.from(
     new Set(
       usrHeatmap
@@ -802,9 +900,9 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
           </div>
         </div>
       )}
-      <div className="bg-slate-50 animate-in fade-in duration-700 min-h-screen w-full m-0 p-0 flex flex-col">
-        <ScrollArea className="flex-1 w-full m-0 p-0">
-          <div className="w-full m-0 p-0">
+      <div className="bg-slate-50 animate-in fade-in duration-700 h-full min-h-0 w-full m-0 p-0 flex flex-col font-sans">
+        <div className="flex-1 min-h-0 h-full w-full overflow-y-auto overflow-x-hidden">
+          <div className="w-full m-0 p-0 pb-10">
             
             {/* --- Unified Command Header --- */}
             <header className="flex items-center justify-between p-6 md:p-8 bg-white border-b border-slate-200 sticky top-0 z-30">
@@ -818,16 +916,23 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
               <div className="flex items-center gap-2">
                 <Button variant="outline" size="sm" onClick={() => fetchUsrDashboard(true)} disabled={usrLoading} className="rounded-xl font-bold text-xs h-9 border-slate-200 text-[#0B4C8C] hover:bg-slate-50">
                   {usrLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-2" /> : <TrendingUp className="w-3.5 h-3.5 mr-2" />}
-                  Refresh Intel
+                  Reload Dashboard Data
                 </Button>
-                <Button onClick={() => runUsrBatch('sync')} size="sm" className="bg-[#0B4C8C] rounded-xl font-bold text-xs h-9 text-white hover:bg-[#0B4C8C]/90 shadow-md shadow-blue-900/10">
+                <Button onClick={() => runUsrBatch('sync')} disabled={usrLoading || !!syncStatus} size="sm" className="bg-[#0B4C8C] rounded-xl font-bold text-xs h-9 text-white hover:bg-[#0B4C8C]/90 shadow-md shadow-blue-900/10">
                   <ShieldCheck className="w-3.5 h-3.5 mr-2" />
-                  Field Audit Sync
+                  Reload Records from Database
                 </Button>
               </div>
             </header>
 
-            <div className="sticky top-[88px] z-20 border-b border-slate-200 bg-white px-6 md:px-8 py-4 space-y-3">
+            {/* Notification / Toast Banner */}
+            <div className="sticky top-[88px] z-20 bg-white border-b border-slate-200 px-6 md:px-8 py-3 space-y-2">
+              {syncStatus && (
+                <div className="rounded-xl border border-blue-200 bg-blue-50/70 px-4 py-2.5 text-xs font-semibold text-blue-800 flex items-center gap-2 animate-pulse">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                  <span>{syncStatus}</span>
+                </div>
+              )}
               {usrError && (
                 <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-xs font-semibold text-rose-700">
                   {usrError}
@@ -838,91 +943,107 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                   Service health is degraded. Some feeds may be partial.
                 </div>
               )}
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge className={`${dependencyHealth?.status === 'healthy' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'} border text-[10px] font-bold`}>
-                  {healthLoading ? 'Checking Services...' : `Health: ${(dependencyHealth?.status || 'unknown').toUpperCase()}`}
-                </Badge>
-                <Badge className="bg-slate-100 text-slate-700 border-slate-300 border text-[10px] font-bold">
-                  Alerts: {filteredIntelFeed.length.toLocaleString()}
-                </Badge>
-                <Badge className="bg-slate-100 text-slate-700 border-slate-300 border text-[10px] font-bold">
-                  Queue: {usrAuditQueue.length.toLocaleString()}
-                </Badge>
-                <Button size="sm" variant={globalRiskFilter === 'REVIEW_PENDING' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('review')}>Needs Review</Button>
-                <Button size="sm" variant={globalRiskFilter === 'HIGH' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('high')}>High Risk</Button>
-                <Button size="sm" variant={globalDateRange === '24H' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('recent')}>Recently Re-judged</Button>
-                <Button size="sm" variant={globalDateRange === '7D' ? 'default' : 'outline'} className="h-7 text-[10px] font-bold" onClick={() => presetFilter('issues')}>Data Issues</Button>
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className={`${dependencyHealth?.status === 'healthy' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'} border text-[10px] font-bold`}>
+                    {healthLoading ? 'Checking Services...' : `Health: ${(dependencyHealth?.status || 'unknown').toUpperCase()}`}
+                  </Badge>
+                  <Badge className="bg-slate-100 text-slate-700 border-slate-300 border text-[10px] font-bold">
+                    Alerts: {filteredIntelFeed.length.toLocaleString()}
+                  </Badge>
+                  <Badge className="bg-slate-100 text-slate-700 border-slate-300 border text-[10px] font-bold">
+                    Queue: {usrAuditQueue.length.toLocaleString()}
+                  </Badge>
+                </div>
+                <div className="text-[10px] text-slate-500 font-medium italic">
+                  Data source: Neo4j Knowledge Graph | PostgreSQL Registry DB
+                </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-2">
-                <select value={globalSchemeFilter} disabled={schemeOptions.length === 0} onChange={(e) => { setGlobalSchemeFilter(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
-                  <option value="ALL">Scheme: All</option>
-                  {schemeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-                <select value={globalDistrictFilter} disabled={districtOptions.length === 0} onChange={(e) => { setGlobalDistrictFilter(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
-                  <option value="ALL">District/GP: All</option>
-                  {districtOptions.map((d) => <option key={d} value={d}>{d}</option>)}
-                </select>
-                <select value={globalRiskFilter} onChange={(e) => { setGlobalRiskFilter(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold">
-                  <option value="ALL">Risk: All</option>
-                  <option value="HIGH">High Confidence</option>
-                  <option value="REVIEW_PENDING">Review Pending</option>
-                </select>
-                <select value={globalDateRange} disabled={!hasDetectedAtData} onChange={(e) => { setGlobalDateRange(e.target.value); setIntelPage(1) }} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed">
-                  <option value="ALL">Date: All</option>
-                  <option value="24H">Last 24h</option>
-                  <option value="7D">Last 7d</option>
-                  <option value="30D">Last 30d</option>
-                </select>
-                <select value={intelSortBy} onChange={(e) => setIntelSortBy(e.target.value as 'confidence' | 'detected_at')} className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold">
-                  <option value="confidence">Sort: Confidence</option>
-                  <option value="detected_at">Sort: Detected Time</option>
-                </select>
-                <input value={globalQuerySearch} onChange={(e) => { setGlobalQuerySearch(e.target.value); setIntelPage(1) }} placeholder="Search UID/Name/Rule" className="h-9 rounded-lg border border-slate-200 px-2 text-xs font-semibold" />
-              </div>
-              <p className="text-[10px] text-slate-500">
-                Filters apply to the Audit Intelligence Queue. Some filters auto-disable when source fields are unavailable.
-              </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-6 md:p-8">
+            {/* Onboarding / Setup Banner */}
+            <div className="px-6 md:px-8 pt-6">
+              <div className="bg-gradient-to-r from-blue-900 via-[#0B4C8C] to-indigo-950 rounded-3xl p-6 md:p-8 text-white shadow-xl relative overflow-hidden">
+                <div className="absolute right-0 top-0 translate-x-12 -translate-y-12 w-64 h-64 bg-white/5 rounded-full blur-xl pointer-events-none" />
+                <div className="absolute left-1/3 bottom-0 translate-y-12 w-48 h-48 bg-blue-400/10 rounded-full blur-lg pointer-events-none" />
+                
+                <div className="relative z-10 flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                  <div className="max-w-3xl space-y-2">
+                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 backdrop-blur-md text-[10px] font-bold uppercase tracking-wider text-blue-200">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      How To Use This Page
+                    </div>
+                    <h2 className="text-xl md:text-2xl font-black tracking-tight text-white leading-tight">
+                      Review Flagged Registry Records
+                    </h2>
+                    <p className="text-xs md:text-sm text-blue-100/90 font-medium leading-relaxed">
+                      Use this page to review citizens, households, and operators flagged by the system.
+                      If no records are showing yet, first load the registry data, then run the system check to generate review cases.
+                    </p>
+                  </div>
+                  
+                  <div className="flex flex-col sm:flex-row gap-3 shrink-0">
+                    <Button 
+                      onClick={() => runUsrBatch('sync')} 
+                      disabled={usrLoading || !!syncStatus}
+                      className="bg-white text-blue-900 font-bold text-xs h-10 px-5 rounded-xl hover:bg-blue-50 transition-all flex items-center justify-center gap-2 shadow-lg"
+                    >
+                      <ShieldCheck className="w-4 h-4 text-blue-900" />
+                      Step 1: Import Records
+                    </Button>
+                    <Button 
+                      onClick={() => runUsrBatch('batch')} 
+                      disabled={usrLoading || !!syncStatus || (!usrStats?.total_citizens)}
+                      className="bg-emerald-500 text-white font-bold text-xs h-10 px-5 rounded-xl hover:bg-emerald-600 transition-all flex items-center justify-center gap-2 shadow-lg"
+                    >
+                      <TrendingUp className="w-4 h-4" />
+                      Step 2: Find Suspicious Cases
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Top Metrics Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 px-6 md:px-8 pt-6">
                {[
                  { 
-                   label: 'Integrity Index', 
+                   label: 'Data Quality Score', 
                    value: typeof usrDataQuality?.integrity_index === 'number' ? `${usrDataQuality.integrity_index}%` : '—', 
-                   sub: usrDataQuality ? `${usrDataQuality.total_issues.toLocaleString()} issue signals` : 'Overall Trust Score',
+                   sub: usrDataQuality ? `${usrDataQuality.total_issues.toLocaleString()} records need cleanup` : 'How clean the loaded data is',
                    icon: <ShieldCheck className="w-5 h-5 text-blue-600" />, 
                    bg: 'bg-blue-50/50',
                    color: 'text-blue-600',
-                   why: 'Measures how many records are unique and free of demographic factory patterns.'
+                   why: 'Shows how clean and trustworthy the imported records are.'
                  },
                  { 
-                   label: 'Critical Leakage', 
-                   value: (usrStats?.critical_count || 0).toLocaleString(), 
-                   sub: 'Immediate Interventions',
-                   icon: <AlertTriangle className="w-5 h-5 text-rose-600" />, 
+                   label: 'Urgent Cases', 
+                   value: (usrStats?.flagged_review_cases || 0).toLocaleString(), 
+                   sub: 'Unique records flagged for review',
+                    icon: <AlertTriangle className="w-5 h-5 text-rose-600" />, 
                    bg: 'bg-rose-50/50',
                    color: 'text-rose-600',
-                   why: 'Identities with >90% probability of being synthetic or fraudulent.'
+                   why: 'Counts each flagged citizen, household, or operator once, even if the same record has multiple findings.'
                  },
                  { 
-                   label: 'Forensic Coverage', 
+                   label: 'Records Loaded', 
                    value: typeof usrStats?.coverage_pct === 'number' ? `${usrStats.coverage_pct}%` : '—',
                    sub: usrStats
                      ? `${(usrStats.total_citizens ?? 0).toLocaleString()} / ${(usrStats.registry_total ?? 2234522).toLocaleString()}`
-                     : 'Sync pending',
+                     : 'Waiting for data import',
                    icon: <Ghost className="w-5 h-5 text-amber-600" />, 
                    bg: 'bg-amber-50/50',
                    color: 'text-amber-600',
-                   why: 'The percentage of the total Social Registry currently synced and analyzed in the Knowledge Graph.'
+                   why: 'Shows how much of the full registry has been loaded into this review system.'
                  },
                  { 
-                   label: 'Avg Vulnerability', 
+                   label: 'Average Risk Score', 
                    value: usrStats?.avg_vulnerability ? usrStats.avg_vulnerability.toFixed(1) : '—', 
-                   sub: 'Regional Hardship',
+                   sub: 'Typical risk level',
                    icon: <Users className="w-5 h-5 text-indigo-600" />, 
                    bg: 'bg-indigo-50/50',
                    color: 'text-indigo-600',
-                   why: 'Weighted score of socio-economic vulnerability based on lifecycle stage.'
+                   why: 'Shows the average risk level across all loaded records.'
                  }
                ].map((kpi, i) => (
                  <Tooltip key={i}>
@@ -947,30 +1068,515 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                  </Tooltip>
                ))}
             </div>
-
-            {/* --- Main Dashboard Content --- */}
-            <div className="grid grid-cols-12 gap-8 px-6 md:px-8 pb-12">
-
-              {/* Left Column: Analytics & Mapping */}
-              <div className="col-span-12 lg:col-span-8 order-2 space-y-8">
+ 
+            {/* --- Main Dashboard Split Content --- */}
+            <div className="grid grid-cols-12 gap-6 px-6 md:px-8 py-6 pb-16">
+              
+              {/* Left Column: Audit Queue Work Area (8 columns wide) */}
+              <div className="col-span-12 lg:col-span-8 space-y-6">
                 
+                {/* Audit Queue Card */}
+                <Card className="p-0 border border-slate-200 overflow-hidden bg-white rounded-3xl shadow-sm">
+                   
+                   {/* Card Title Header */}
+                   <div className="p-6 pb-4 flex items-center justify-between">
+                     <div>
+                       <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                         Cases That Need Review
+                         <Settings className="w-4 h-4 text-slate-400" />
+                       </h3>
+                       <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                         Review people, households, and operators flagged by the system. Confirm real issues or dismiss false alarms.
+                       </p>
+                       <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400 mt-2">
+                         {activeQueueTotal > 0
+                           ? `${activeQueueTotal.toLocaleString()} live findings across ${actionableQueueTabs.length || 1} active sections`
+                           : 'No live findings available right now'}
+                       </p>
+                     </div>
+                     <div className="flex gap-2">
+                       <Button size="sm" onClick={handleAuditAll} className="h-8 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold uppercase px-3 rounded-xl">
+                         Open Full Review Queue
+                       </Button>
+                     </div>
+                   </div>
+
+                   {/* Custom Tab selectors for Queue categories */}
+                   <div className="flex border-b border-slate-200 bg-slate-50/50 px-6">
+                     {queueTabs.map((tab) => (
+                       <button
+                         key={tab.id}
+                         type="button"
+                         disabled={tab.count === 0}
+                         onClick={() => setActiveQueueTab(tab.id)}
+                         className={`py-3 text-[10px] font-black uppercase tracking-wider border-b-2 px-4 transition-all ${
+                           activeQueueTab === tab.id
+                             ? 'border-blue-600 text-blue-700 bg-white'
+                             : tab.count === 0
+                               ? 'border-transparent text-slate-300 cursor-not-allowed'
+                               : 'border-transparent text-slate-500 hover:text-slate-700'
+                         }`}
+                       >
+                         {tab.label} ({tab.count})
+                       </button>
+                     ))}
+                   </div>
+
+                   {/* Main Scrollable Queue List */}
+                   <ScrollArea className="h-[650px]">
+                     <div className="p-6 space-y-4">
+                       
+                       {/* Tab Content: Individual Findings */}
+                       {activeQueueTab === 'individual' && (
+                         <>
+                           {/* Quick Filter Section inside the Tab panel */}
+                           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100 space-y-3 mb-6">
+                             <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
+                                <p className="text-[9px] font-black uppercase tracking-wider text-slate-400">Filter Reviewed Cases</p>
+                                <div className="flex flex-wrap items-center gap-1">
+                                  <Button size="sm" variant={globalRiskFilter === 'REVIEW_PENDING' ? 'default' : 'outline'} className="h-6 text-[9px] font-bold px-2 rounded-lg" onClick={() => presetFilter('review')}>Waiting For Review</Button>
+                                  <Button size="sm" variant={globalRiskFilter === 'HIGH' ? 'default' : 'outline'} className="h-6 text-[9px] font-bold px-2 rounded-lg" onClick={() => presetFilter('high')}>Highest Confidence</Button>
+                                  <Button size="sm" variant={globalDateRange === '24H' ? 'default' : 'outline'} className="h-6 text-[9px] font-bold px-2 rounded-lg" onClick={() => presetFilter('recent')}>Detected In Last 24h</Button>
+                                  <Button size="sm" variant={globalDateRange === '7D' ? 'default' : 'outline'} className="h-6 text-[9px] font-bold px-2 rounded-lg" onClick={() => presetFilter('issues')}>Detected In Last 7d</Button>
+                                </div>
+                              </div>
+                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
+                               <select value={globalSchemeFilter} disabled={schemeOptions.length === 0} onChange={(e) => { setGlobalSchemeFilter(e.target.value); setIntelPage(1) }} className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white disabled:opacity-55">
+                                 <option value="ALL">Scheme: All</option>
+                                 {schemeOptions.map((s) => <option key={s} value={s}>{s}</option>)}
+                               </select>
+                               <select value={globalDistrictFilter} disabled={districtOptions.length === 0} onChange={(e) => { setGlobalDistrictFilter(e.target.value); setIntelPage(1) }} className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white disabled:opacity-55">
+                                 <option value="ALL">District: All</option>
+                                 {districtOptions.map((d) => <option key={d} value={d}>{d}</option>)}
+                               </select>
+                               <select value={globalRiskFilter} onChange={(e) => { setGlobalRiskFilter(e.target.value); setIntelPage(1) }} className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white">
+                                 <option value="ALL">Risk: All</option>
+                                 <option value="HIGH">High Confidence</option>
+                                 <option value="REVIEW_PENDING">Review Pending</option>
+                               </select>
+                               <select value={globalRuleFilter} onChange={(e) => { setGlobalRuleFilter(e.target.value); setIntelPage(1) }} className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white">
+                                 <option value="ALL">Rule: All</option>
+                                 {pdfRuleOptions.map((r) => (
+                                   <option key={r} value={r}>
+                                     {ruleLabels[r] || `Rule ${r}`}
+                                   </option>
+                                 ))}
+                               </select>
+                               <select value={globalDateRange} disabled={!hasDetectedAtData} onChange={(e) => { setGlobalDateRange(e.target.value); setIntelPage(1) }} className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white disabled:opacity-55">
+                                 <option value="ALL">Date: All</option>
+                                 <option value="24H">Last 24h</option>
+                                 <option value="7D">Last 7d</option>
+                                 <option value="30D">Last 30d</option>
+                               </select>
+                               <select value={intelSortBy} onChange={(e) => setIntelSortBy(e.target.value as 'confidence' | 'detected_at')} className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white">
+                                 <option value="confidence">Sort: Confidence</option>
+                                 <option value="detected_at">Sort: Detected Time</option>
+                               </select>
+                               <input value={globalQuerySearch} onChange={(e) => { setGlobalQuerySearch(e.target.value); setIntelPage(1) }} placeholder="Search Name/UID" className="h-8 rounded-lg border border-slate-200 px-2 text-[11px] font-bold text-slate-700 bg-white focus:outline-none col-span-1 md:col-span-2" />
+                             </div>
+                           </div>
+
+                           {/* Findings list */}
+                           <div className="space-y-4">
+                             {pagedIntelFeed.map((flag: UsrQueueDisplayItem, i: number) => {
+                               const isGhost = String(flag.type || '').toUpperCase().includes('GHOST');
+                               const isDuplicate = String(flag.type || '').toUpperCase().includes('DUPLICATE') || String(flag.type || '').toUpperCase().includes('CLONE');
+                               const isAuditQueueFallback = flag.source === 'audit_queue'
+                               const auditCase = flag.auditCase
+                               
+                               return (
+                                 <div key={`intel-${i}`} className="p-5 rounded-2xl bg-white border border-slate-200 hover:border-slate-300 transition-all hover:shadow-sm space-y-4">
+                                   
+                                   {/* Card Top Banner */}
+                                   <div className="flex items-center justify-between">
+                                     <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider ${
+                                       isGhost ? 'bg-rose-50 text-rose-700 border border-rose-100' :
+                                       isDuplicate ? 'bg-orange-50 text-orange-700 border border-orange-100' :
+                                       'bg-amber-50 text-amber-700 border border-amber-100'
+                                     }`}>
+                                       {isGhost ? <Ghost className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                                       {flag.label || `Rule ${flag.rule}`}
+                                     </span>
+                                     <Badge className="bg-slate-100 text-slate-700 border border-slate-200 text-[8.5px] font-black tracking-wide px-2">
+                                       {flag.confidence}% CONFIDENCE
+                                     </Badge>
+                                   </div>
+
+                                   {/* Profile & Heuristic details */}
+                                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                     <div className="space-y-1">
+                                       <h4 className="text-sm font-black text-slate-900">{flag.name || 'Unknown Identity'}</h4>
+                                       <p className="text-[10px] font-mono text-slate-400 uppercase tracking-tight">UID: {flag.uid || 'N/A'}</p>
+                                       <p className="text-[10px] font-bold text-slate-500">
+                                         Location: <span className="text-slate-800">{flag.gp_name || flag.district || flag.block || 'Unknown GP'}</span>
+                                       </p>
+                                       {isAuditQueueFallback && (
+                                         <p className="text-[10px] font-bold text-slate-500">
+                                           Priority score: <span className="text-slate-800">{flag.score ?? 'N/A'}</span> | Linked flags: <span className="text-slate-800">{flag.flags ?? 0}</span>
+                                         </p>
+                                       )}
+                                     </div>
+                                     <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 space-y-1">
+                                       <span className="text-[8px] font-black uppercase tracking-widest text-slate-400">
+                                         {isAuditQueueFallback ? 'Why This Case Was Sent For Field Review' : 'Why The System Flagged This Case'}
+                                       </span>
+                                       <p className="text-[10px] text-slate-700 font-medium leading-relaxed">
+                                         {flag.description || getWhyExplanation(flag)}
+                                       </p>
+                                       {isAuditQueueFallback && auditCase?.flag_notes?.length ? (
+                                         <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
+                                           {auditCase.flag_notes.slice(0, 2).join(' | ')}
+                                         </p>
+                                       ) : null}
+                                     </div>
+                                   </div>
+
+                                   {/* Audit Verification Actions */}
+                                   <div className="pt-3 border-t border-slate-100 space-y-3">
+                                     {!isAuditQueueFallback && (
+                                       <div className="space-y-1">
+                                         <span className="text-[8.5px] font-black uppercase tracking-widest text-slate-400">Auditor Notes & Observations</span>
+                                         <textarea
+                                           value={reviewNoteById[flag.id || ''] || ''}
+                                           onChange={(e) => setReviewNoteById((prev) => ({ ...prev, [flag.id || '']: e.target.value }))}
+                                           placeholder="Enter audit observations, field verification findings, or rejection justifications..."
+                                           rows={2}
+                                           className="w-full rounded-xl border border-slate-200 bg-slate-50/50 p-3 text-[11px] font-medium text-slate-700 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"
+                                         />
+                                       </div>
+                                     )}
+
+                                     <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                                       {flag.latest_review ? (
+                                         <div className="flex items-center gap-1.5 text-[9px] font-bold text-slate-500 bg-slate-100 px-3 py-1 rounded-lg border border-slate-200">
+                                           <span className={`w-1.5 h-1.5 rounded-full ${
+                                             flag.latest_review.action === 'APPROVE' ? 'bg-emerald-500' :
+                                             flag.latest_review.action === 'REJECT' ? 'bg-rose-500' :
+                                             'bg-amber-500'
+                                           }`} />
+                                           Last action: {flag.latest_review.action === 'APPROVE' ? 'Confirmed Anomaly' : flag.latest_review.action === 'REJECT' ? 'Dismissed Anomaly' : 'Escalated'} by {flag.latest_review.reviewed_by}
+                                         </div>
+                                       ) : isAuditQueueFallback ? (
+                                         <div className="text-[9px] font-black uppercase tracking-wider text-slate-400">
+                                           Status: Review summary available
+                                         </div>
+                                       ) : (
+                                         <div className="text-[9px] font-black uppercase tracking-wider text-slate-400">
+                                           Status: Waiting for reviewer decision
+                                         </div>
+                                       )}
+                                       <div className="flex items-center gap-1.5">
+                                         {isAuditQueueFallback ? (
+                                           <Button
+                                             size="sm"
+                                             variant="outline"
+                                           onClick={() => auditCase && handleDrillDown(auditCase)}
+                                           className="h-7 text-[9.5px] font-bold px-3 border-blue-500 text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-all"
+                                          >
+                                             Open Case Details
+                                           </Button>
+                                         ) : (
+                                           <>
+                                             <Button 
+                                               size="sm" 
+                                               variant="outline" 
+                                               disabled={reviewBusyId === flag.id} 
+                                               onClick={() => submitReviewAction(flag, 'APPROVE')}
+                                               className="h-7 text-[9.5px] font-bold px-3 border-emerald-500 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-all"
+                                             >
+                                               Mark As Real Issue
+                                             </Button>
+                                             <Button 
+                                               size="sm" 
+                                               variant="outline" 
+                                               disabled={reviewBusyId === flag.id} 
+                                               onClick={() => submitReviewAction(flag, 'REJECT')}
+                                               className="h-7 text-[9.5px] font-bold px-3 border-rose-500 text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-all"
+                                             >
+                                               Mark As False Alarm
+                                             </Button>
+                                             <Button 
+                                               size="sm" 
+                                               variant="outline" 
+                                               disabled={reviewBusyId === flag.id} 
+                                               onClick={() => submitReviewAction(flag, 'ESCALATE')}
+                                               className="h-7 text-[9.5px] font-bold px-3 border-amber-500 text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-all"
+                                             >
+                                               Send For Senior Review
+                                             </Button>
+                                           </>
+                                         )}
+                                         <Button 
+                                           size="sm" 
+                                           variant="outline" 
+                                           onClick={() => {
+                                             if (isAuditQueueFallback && auditCase) {
+                                               handleDrillDown(auditCase)
+                                               return
+                                             }
+                                             setSelectedIntelItem(flag)
+                                             setIntelExplainOpen(true)
+                                           }}
+                                           className="h-7 text-[9.5px] font-bold px-3 border-slate-350 text-slate-700 bg-slate-50 hover:bg-slate-150 rounded-lg transition-all"
+                                         >
+                                           {isAuditQueueFallback ? 'View Details' : 'Why Flagged'}
+                                         </Button>
+                                       </div>
+                                     </div>
+                                   </div>
+                                 </div>
+                               );
+                             })}
+                             
+                             {filteredIntelFeed.length === 0 && (
+                               <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center">
+                                 <p className="text-[11px] font-semibold text-slate-700">No individual anomalies match your filters.</p>
+                                 <p className="mt-1 text-[10px] text-slate-400">Try adjusting the filter options or search terms above.</p>
+                               </div>
+                             )}
+                           </div>
+                         </>
+                       )}
+
+                       {/* Tab Content: Household Overloads */}
+                       {activeQueueTab === 'household' && (
+                         <div className="space-y-3">
+                           <div className="bg-indigo-50 p-4 rounded-2xl border border-indigo-100/50 mb-3">
+                             <p className="text-xs text-indigo-800 font-medium leading-relaxed">
+                               <strong>Rule E1 (Household Overload):</strong> Flagged when an abnormally high number of citizens are registered under a single Ration Card number, indicating synthetic demographic creation.
+                             </p>
+                           </div>
+                           {usrRulesEF.rule_e.map((caseData: any, i: number) => (
+                             <div key={`e-${i}`} className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-200 transition-colors">
+                               <div className="flex items-start justify-between mb-3">
+                                  <div className="flex items-center gap-2">
+                                     <Users className="w-3.5 h-3.5 text-indigo-500" />
+                                     <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-600">Household Rule E1</span>
+                                  </div>
+                                  <Badge className="bg-white border-indigo-200 text-indigo-700 text-[8px] font-bold">95% SYSTEM CONFIDENCE</Badge>
+                               </div>
+                               <p className="text-xs font-bold text-slate-900 mb-1">Ration Card ID: {caseData.ration_card}</p>
+                               <p className="text-[10px] text-indigo-900 font-medium">
+                                 Synthetic Household Detected: <strong>{caseData.member_count} citizens</strong> are linked to this single Ration Card hub.
+                               </p>
+                             </div>
+                           ))}
+                           {usrRulesEF.rule_e.length === 0 && (
+                             <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center">
+                               <p className="text-[11px] font-semibold text-slate-700">No household ring anomalies detected.</p>
+                             </div>
+                           )}
+                         </div>
+                       )}
+
+                       {/* Tab Content: Operator Anomalies */}
+                       {activeQueueTab === 'operator' && (
+                         <div className="space-y-3">
+                           <div className="bg-rose-50 p-4 rounded-2xl border border-rose-100/50 mb-3">
+                             <p className="text-xs text-rose-800 font-medium leading-relaxed">
+                               <strong>Rule F1 (Operator Fraud Ratio):</strong> Identifies registration agents whose submitted records contain disproportionately high anomaly scores, suggesting administrative corruption. Click any row to drill down.
+                             </p>
+                           </div>
+                           {usrRulesEF.rule_f.map((caseData: any, i: number) => (
+                             <div 
+                               key={`f-${i}`} 
+                               onClick={() => fetchOperatorAudit(caseData.operator_id)}
+                               className="p-4 rounded-xl bg-rose-50/50 border border-rose-200 hover:border-rose-350 transition-all cursor-pointer group active:scale-95"
+                             >
+                               <div className="flex items-start justify-between mb-3">
+                                  <div className="flex items-center gap-2">
+                                     <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
+                                     <span className="text-[10px] font-black uppercase tracking-[0.2em] text-rose-600">Operator Rule F1</span>
+                                  </div>
+                                  <Badge className="bg-white border-rose-200 text-rose-700 text-[8px] font-bold">90% SYSTEM CONFIDENCE</Badge>
+                               </div>
+                               <p className="text-xs font-bold text-slate-900 mb-1">Operator ID: {caseData.operator_id}</p>
+                               <div className="flex items-center justify-between">
+                                 <p className="text-[10px] text-rose-800 font-medium">
+                                   Abnormal Activity: <strong>{Math.round(caseData.fraud_rate * 100)}% Anomaly Index</strong> detected among operator registrations.
+                                 </p>
+                                 <span className="text-[9px] font-black text-rose-600 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Drill Down →</span>
+                               </div>
+                             </div>
+                           ))}
+                           {usrRulesEF.rule_f.length === 0 && (
+                             <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center">
+                               <p className="text-[11px] font-semibold text-slate-700">No operator-level anomalies detected.</p>
+                             </div>
+                           )}
+                         </div>
+                       )}
+
+                       {/* Empty State when intelligence feed is completely null */}
+                       {intelligenceFeedCount === 0 && (
+                          <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-12 text-center">
+                            <p className="text-[11px] font-semibold text-slate-700">No intelligence alerts available yet.</p>
+                            <p className="mt-2 text-[10px] leading-relaxed text-slate-500 max-w-md mx-auto">
+                              The intelligence feed is empty. Run a PostgreSQL database synchronization and then execute an anomaly rules batch scan to populate findings.
+                            </p>
+                          </div>
+                        )}
+                     </div>
+                   </ScrollArea>
+                   
+                   {/* Card Footer Page Selector */}
+                   <div className="p-6 bg-slate-50/50 flex items-center justify-between border-t border-slate-200">
+                     <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                       Showing {filteredIntelFeed.length.toLocaleString()} filtered alerts
+                     </span>
+                     <div className="flex items-center gap-2">
+                       {intelPage > 1 && (
+                         <Button
+                           size="sm"
+                           onClick={() => setIntelPage((p) => Math.max(1, p - 1))}
+                           className="h-8 bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-bold uppercase px-4 rounded-xl"
+                         >
+                           Prev
+                         </Button>
+                       )}
+                       {intelPage < totalIntelPages && (
+                         <Button
+                           size="sm"
+                           onClick={() => setIntelPage((p) => Math.min(totalIntelPages, p + 1))}
+                           className="h-8 bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-bold uppercase px-4 rounded-xl"
+                         >
+                           Next
+                         </Button>
+                       )}
+                       {usrIntelligenceFeed.length < usrIntelligenceTotal && (
+                         <Button
+                           size="sm"
+                           onClick={handleLoadMoreIntelligence}
+                           disabled={usrLoadingMoreIntel}
+                           className="h-8 bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-bold uppercase px-4 rounded-xl"
+                         >
+                           {usrLoadingMoreIntel ? 'Loading...' : 'Load More'}
+                         </Button>
+                       )}
+                     </div>
+                   </div>
+                </Card>
+
+              </div>
+
+              {/* Right Column: Downloads, Exports & Spatial Risk (4 columns wide) */}
+              <div className="col-span-12 lg:col-span-4 space-y-6">
+                
+                {/* Export & Report Downloads Card */}
+                <Card className="p-6 border border-slate-200 bg-white rounded-3xl shadow-sm space-y-6">
+                  <div>
+                    <h3 className="text-base font-black text-slate-900 flex items-center gap-2">
+                      Export Audit Reports
+                      <Download className="w-4 h-4 text-[#0B4C8C]" />
+                    </h3>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      Export verification lists and datasets directly to PDF or CSV format.
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    {/* PDF Export form widget */}
+                    <div className="space-y-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                      <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">PDF Forensic Brief</h4>
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        Generates a print-ready PDF audit brief matching selected locations and rules.
+                      </p>
+                      
+                      <div className="space-y-2">
+                        <div className="space-y-1">
+                          <label className="text-[8.5px] font-bold uppercase text-slate-400">Target District</label>
+                          <select
+                            value={pdfDistrictFilter}
+                            onChange={(e) => setPdfDistrictFilter(e.target.value)}
+                            className="w-full h-8 rounded-lg border border-slate-200 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-700 bg-white"
+                          >
+                            <option value="ALL">District: All</option>
+                            {pdfDistrictOptions.map((d) => (
+                              <option key={d} value={d}>{d}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[8.5px] font-bold uppercase text-slate-400">Target Mauza / Block</label>
+                          <select
+                            value={pdfMauzaFilter}
+                            onChange={(e) => setPdfMauzaFilter(e.target.value)}
+                            className="w-full h-8 rounded-lg border border-slate-200 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-700 bg-white"
+                          >
+                            <option value="ALL">Mauza: All</option>
+                            {pdfMauzaOptions.map((m) => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[8.5px] font-bold uppercase text-slate-400">Heuristic Rule</label>
+                          <select
+                            value={pdfRuleFilter}
+                            onChange={(e) => setPdfRuleFilter(e.target.value)}
+                            className="w-full h-8 rounded-lg border border-slate-200 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-700 bg-white"
+                          >
+                            <option value="ALL">Rule: All</option>
+                            {pdfRuleOptions.map((r) => (
+                              <option key={r} value={r}>Rule {r}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <Button 
+                        onClick={handleDownloadPdf} 
+                        disabled={pdfDownloading} 
+                        className="w-full bg-[#0B4C8C] hover:bg-[#0B4C8C]/90 text-white font-black text-[10px] uppercase h-9 rounded-xl tracking-wider disabled:opacity-60 transition-all flex items-center justify-center gap-1 shadow-sm mt-1"
+                      >
+                        {pdfDownloading ? (
+                          <>
+                            <Loader2 className="w-3 h-3 animate-spin mr-1" />
+                            Generating Brief...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="w-3.5 h-3.5 mr-1" />
+                            Download PDF Brief
+                          </>
+                        )}
+                      </Button>
+                    </div>
+
+                    {/* CSV Export widget */}
+                    <div className="space-y-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                      <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400">CSV Spreadsheet</h4>
+                      <p className="text-[10px] text-slate-500 leading-relaxed">
+                        Export all system predictions and flags to a CSV sheet for external analytics.
+                      </p>
+                      <Button 
+                        onClick={handleExportAuditCSV}
+                        className="w-full bg-slate-800 hover:bg-slate-900 text-white font-black text-[10px] uppercase h-9 rounded-xl tracking-wider transition-all flex items-center justify-center gap-1 shadow-sm mt-1"
+                      >
+                        <Download className="w-3.5 h-3.5 mr-1" />
+                        Export Findings CSV
+                      </Button>
+                    </div>
+                  </div>
+                </Card>
+
                 {/* District Risk Heatmap */}
-                <Card className="glass-panel p-8 border-none ring-1 ring-slate-100 overflow-hidden">
-                   <div className="flex items-center justify-between mb-8 text-neutral-600">
+                <Card className="glass-panel p-6 border-none ring-1 ring-slate-100 overflow-hidden rounded-3xl bg-white shadow-sm">
+                   <div className="flex items-center justify-between mb-6 text-neutral-600">
                      <div>
                        <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                         Geo-Spatial Risk Deployment
-                         <Map className="w-4 h-4 text-slate-400" />
+                         Spatial Risk Layout
+                         <Map className="w-4 h-4 text-slate-450" />
                        </h3>
-                       <p className="text-xs text-slate-500 font-medium mt-1">Which Districts are seeing the highest "Systemic Leakage"?</p>
+                       <p className="text-[10px] text-slate-550 font-medium mt-0.5">Average Anomaly Risk Index by district.</p>
                      </div>
-                     <Badge className="bg-slate-100 text-slate-500 text-[9px] font-bold h-6 px-3">UPDATED REAL-TIME</Badge>
+                     <Badge className="bg-slate-100 text-slate-550 border-slate-200 text-[8px] font-bold">LIVE UPDATE</Badge>
                    </div>
                    
-                    <div ref={heatmapContainerRef} className="h-[300px] w-full min-w-0 relative overflow-hidden" style={{ minHeight: '300px' }}>
+                    <div ref={heatmapContainerRef} className="h-[250px] w-full min-w-0 relative overflow-hidden" style={{ minHeight: '250px' }}>
                       {heatmapReady && usrHeatmap.length > 0 ? (
-                      <ResponsiveContainer width="100%" height={300} minWidth={0} minHeight={260}>
-                        <BarChart data={usrHeatmap.slice(0, 10)} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
+                      <ResponsiveContainer width="100%" height={250} minWidth={0} minHeight={200}>
+                        <BarChart data={usrHeatmap.slice(0, 5)} margin={{ top: 10, right: 10, left: -25, bottom: 20 }}>
                           <defs>
                             <linearGradient id="riskGrad" x1="0" y1="0" x2="0" y2="1">
                               <stop offset="5%" stopColor="#ef4444" stopOpacity={0.8}/>
@@ -982,287 +1588,46 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
                             dataKey="district" 
                             axisLine={false} 
                             tickLine={false} 
-                            tick={{ fontSize: 9, fontWeight: 700, fill: '#64748b' }} 
+                            tick={{ fontSize: 8.5, fontWeight: 700, fill: '#64748b' }} 
                             interval={0}
                             angle={-15}
                             textAnchor="end"
                             dy={10} 
                           />
-                          <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: '#94a3b8' }} />
-                          <RechartsTooltip cursor={{fill: '#f8fafc'}} contentStyle={{ backgroundColor: '#0f172a', borderRadius: '16px', border: 'none', color: '#fff', padding: '12px' }} />
-                          <Bar dataKey="avg_risk_score" name="Risk Index" fill="url(#riskGrad)" radius={[8, 8, 0, 0]} barSize={32} />
+                          <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 8, fill: '#94a3b8' }} />
+                          <RechartsTooltip cursor={{fill: '#f8fafc'}} contentStyle={{ backgroundColor: '#0f172a', borderRadius: '12px', border: 'none', color: '#fff', padding: '8px', fontSize: '10px' }} />
+                          <Bar dataKey="avg_risk_score" name="Risk Score" fill="url(#riskGrad)" radius={[6, 6, 0, 0]} barSize={24} />
                         </BarChart>
                       </ResponsiveContainer>
                       ) : (
-                      <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 text-[11px] font-medium text-slate-400">
-                        {usrLoading ? "Scanning the Knowledge Graph..." : "No regional risk data available. Run Field Audit Sync."}
+                      <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50/50 text-[10px] font-medium text-slate-400">
+                        {usrLoading ? "Scanning Knowledge Graph..." : "No regional risk data available."}
                       </div>
                       )}
                     </div>
                    
-                   <div className="mt-8 pt-6 border-t border-slate-50 flex items-center justify-between">
-                      <div className="flex gap-6">
-                        <div className="flex items-center gap-2">
-                           <div className="w-2.5 h-2.5 rounded-full bg-rose-500" />
-                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Critical Zones</span>
+                   <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between">
+                      <div className="flex gap-4">
+                        <div className="flex items-center gap-1.5">
+                           <div className="w-2 h-2 rounded-full bg-rose-500" />
+                           <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Critical</span>
                         </div>
-                        <div className="flex items-center gap-2">
-                           <div className="w-2.5 h-2.5 rounded-full bg-orange-400" />
-                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">High Volatility</span>
+                        <div className="flex items-center gap-1.5">
+                           <div className="w-2 h-2 rounded-full bg-orange-400" />
+                           <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">High</span>
                         </div>
                       </div>
-                      <Button variant="ghost" size="sm" className="text-[10px] font-bold uppercase tracking-widest gap-2 text-blue-600 hover:text-blue-700">
+                      <Button variant="ghost" size="sm" className="text-[9px] font-bold uppercase tracking-wider gap-1.5 text-blue-600 hover:text-blue-700 h-8">
                         View GIS Report <ArrowRight className="w-3 h-3" />
                       </Button>
                    </div>
                 </Card>
 
-                {/* Lifecycle Segmentation Table */}
-                <Card className="glass-panel p-0 border-none ring-1 ring-slate-100 overflow-hidden">
-                   <div className="p-8 pb-4">
-                     <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                       Lifecycle Vulnerability & Targeted Interventions
-                       <UserCheck2 className="w-4 h-4 text-slate-400" />
-                     </h3>
-                     <p className="text-xs text-slate-500 font-medium mt-1 mb-6">Categorizing beneficiaries based on their current stage for scheme optimization.</p>
-                     
-                     <div className="flex gap-2 mb-6">
-                       {['all', 'elderly', 'children', 'workers'].map((seg) => (
-                         <Button 
-                           key={seg}
-                           onClick={() => setSegmentFilter(seg)}
-                           variant={segmentFilter === seg ? 'default' : 'outline'}
-                           className={`h-8 px-4 text-[10px] font-bold uppercase tracking-widest rounded-lg ${segmentFilter === seg ? 'bg-[#0B4C8C] hover:bg-[#0B4C8C]/90 text-white shadow-sm' : 'border-slate-100 bg-slate-50'}`}
-                         >
-                           {seg === 'workers' ? 'working age' : seg}
-                         </Button>
-                       ))}
-                     </div>
-                   </div>
-
-                   <table className="w-full text-left">
-                     <thead className="bg-slate-50/50 border-y border-slate-100">
-                       <tr>
-                         {['Citizen Name', 'Region (District)', 'Age Profile', 'Calculated Risk', 'Status'].map(h => (
-                           <th key={h} className="py-3 px-8 text-[9px] font-bold uppercase tracking-[0.2em] text-slate-400">{h}</th>
-                         ))}
-                       </tr>
-                     </thead>
-                     <tbody className="divide-y divide-slate-50">
-                       {filteredCitizens.length === 0 && (
-                        <tr>
-                          <td colSpan={5} className="py-12 px-8 text-center">
-                            <p className="text-sm font-bold text-slate-400">No citizens match this filter.</p>
-                            <p className="text-xs text-slate-300 mt-1">Try selecting a different segment or syncing data first.</p>
-                          </td>
-                        </tr>
-                      )}
-                      {visibleCitizens.map((citizen: UsrCitizen, i: number) => {
-                         const color = getRiskColor(citizen.score)
-                         const tier = getRiskTierBadge(citizen.tier || 'LOW')
-                         const age = calculateAge(citizen.dob)
-                         return (
-                           <tr key={i} className="hover:bg-slate-50/30 transition-colors group">
-                             <td className="py-4 px-8">
-                               <div className="flex items-center gap-3">
-                                 <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-500">
-                                   {citizen.name.split(' ').map(n => n[0]).join('')}
-                                 </div>
-                                 <p className="text-xs font-bold text-slate-900">{citizen.name}</p>
-                               </div>
-                             </td>
-                             <td className="py-4 px-8 text-xs font-medium text-slate-500">{citizen.district} <span className="text-[10px] text-slate-300 ml-1">({citizen.gp})</span></td>
-                             <td className="py-4 px-8">
-                               <div className="flex flex-col gap-1">
-                                 <span className="text-xs font-bold text-slate-700">{age} yrs</span>
-                                 <span className={`text-[8px] font-bold uppercase tracking-widest ${age >= 60 ? 'text-blue-500' : age <= 18 ? 'text-indigo-500' : 'text-slate-400'}`}>
-                                   {age >= 60 ? 'ELDERLY / PENSION' : age <= 18 ? 'SCHOOL AGE / NUTRITION' : 'WORKER / NREGA'}
-                                 </span>
-                               </div>
-                             </td>
-                             <td className="py-4 px-8">
-                               <div className="flex items-center gap-2">
-                                 <div className="flex-1 h-1.5 w-16 bg-slate-100 rounded-full overflow-hidden">
-                                   <div className="h-full rounded-full transition-all duration-1000" style={{ width: `${citizen.score}%`, backgroundColor: color }} />
-                                 </div>
-                                 <span className="text-xs font-black text-slate-900">{citizen.score}%</span>
-                               </div>
-                             </td>
-                             <td className="py-4 px-8">
-                               <Badge className="text-[8px] font-black uppercase tracking-widest px-2" style={{ backgroundColor: tier.bg, color: tier.color }}>
-                                 {citizen.tier || 'MODERATE'}
-                               </Badge>
-                             </td>
-                           </tr>
-                         )
-                       })}
-                     </tbody>
-                   </table>
-                    {filteredCitizens.length > 10 && (
-                      <div className="p-6 bg-slate-50/30 border-t border-slate-100 text-center">
-                        <Button
-                          variant="link"
-                          onClick={() => setShowAllCitizens((v: boolean) => !v)}
-                          className="text-xs font-bold text-slate-500 hover:text-slate-900"
-                        >
-                          {showAllCitizens
-                            ? 'Show Less'
-                            : `View All ${filteredCitizens.length} ${segmentFilter === 'all' ? 'High-Volume' : segmentFilter.charAt(0).toUpperCase() + segmentFilter.slice(1)} Cases`
-                          }
-                        </Button>
-                      </div>
-                    )}
-                    {filteredCitizens.length <= 10 && filteredCitizens.length > 0 && (
-                      <div className="p-4 bg-slate-50/30 border-t border-slate-100 text-center">
-                        <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">Showing all {filteredCitizens.length} cases in this segment</span>
-                      </div>
-                    )}
-                </Card>
-              </div>
-
-              {/* Right Column: Intelligence Feed & Data Quality */}
-              <div className="col-span-12 order-1 space-y-8">
-                
-                {/* Rules & Explainability Feed */}
-                <Card className="p-0 border border-slate-200 overflow-hidden bg-white">
-                   <div className="p-8">
-                     <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                       Audit Intelligence Queue
-                       <Settings className="w-4 h-4 text-slate-500" />
-                     </h3>
-                     <p className="text-[11px] text-slate-500 font-medium mt-1">Review each alert with evidence, then approve, reject, or escalate with notes.</p>
-                   </div>
-
-                    <ScrollArea className="h-[435px] border-t border-slate-200">
-                      <div className="p-6 space-y-4">
-                        {/* Unified Knowledge Graph Intelligence Feed (A-I) */}
-                        {pagedIntelFeed.map((flag: any, i: number) => (
-                           <div key={`intel-${i}`} className="p-4 rounded-xl bg-slate-50 border border-slate-200 hover:border-slate-300 transition-colors group">
-                               <div className="flex items-start justify-between mb-3">
-                                  <div className="flex items-center gap-2">
-                                     {flag.type === 'GHOST' ? <Ghost className="w-3.5 h-3.5 text-rose-500" /> : <Copy className="w-3.5 h-3.5 text-orange-400" />}
-                                     <span className="text-[10px] font-black uppercase tracking-[0.2em]" style={{ color: flag.type === 'GHOST' ? '#ef4444' : '#fb923c' }}>
-                                        {flag.label || `Rule ${flag.rule}`}
-                                     </span>
-                                  </div>
-                                     <Badge className="bg-white border-slate-300 text-slate-700 text-[8px] font-bold">{flag.confidence}% CONF</Badge>
-                               </div>
-                               <p className="text-xs font-bold text-slate-900 mb-2 leading-snug">{flag.name || 'Unknown Identity'}</p>
-                               <p className="text-[10px] text-slate-600 leading-relaxed font-medium">
-                                 Detected in <span className="text-slate-800">{flag.gp_name || 'Unknown GP'}</span>. {flag.description}
-                               </p>
-                               <div className="mt-3 flex flex-wrap gap-1">
-                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-emerald-500 text-emerald-700 bg-emerald-50" disabled={reviewBusyId === flag.id} onClick={() => submitReviewAction(flag, 'APPROVE')}>Approve</Button>
-                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-rose-500 text-rose-700 bg-rose-50" disabled={reviewBusyId === flag.id} onClick={() => submitReviewAction(flag, 'REJECT')}>Reject</Button>
-                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-amber-500 text-amber-700 bg-amber-50" disabled={reviewBusyId === flag.id} onClick={() => submitReviewAction(flag, 'ESCALATE')}>Escalate</Button>
-                                 <Button size="sm" variant="outline" className="h-6 text-[9px] px-2 border-blue-500 text-blue-700 bg-blue-50" onClick={() => { setSelectedIntelItem(flag); setIntelExplainOpen(true) }}>Explain</Button>
-                               </div>
-                               <input
-                                 value={reviewNoteById[flag.id || ''] || ''}
-                                 onChange={(e) => setReviewNoteById((prev) => ({ ...prev, [flag.id || '']: e.target.value }))}
-                                 placeholder="Review note (required for reject/escalate)"
-                                 className="mt-2 h-7 w-full rounded-md border border-slate-300 bg-white px-2 text-[10px] text-slate-700 placeholder:text-slate-400"
-                               />
-                               {flag.latest_review && (
-                                 <p className="mt-2 text-[9px] text-slate-500 font-semibold">
-                                   Last review: {flag.latest_review.action} by {flag.latest_review.reviewed_by}
-                                 </p>
-                               )}
-                           </div>
-                        ))}
-
-                        {/* Household Overload Rules (E) */}
-                        {usrRulesEF.rule_e.slice(0, 5).map((caseData: any, i: number) => (
-                          <div key={`e-${i}`} className="p-4 rounded-xl bg-indigo-50 border border-indigo-200 transition-colors group">
-                            <div className="flex items-start justify-between mb-3">
-                               <div className="flex items-center gap-2">
-                                  <Users className="w-3.5 h-3.5 text-indigo-400" />
-                                  <span className="text-[10px] font-black uppercase tracking-[0.2em] text-indigo-400">Rule E1</span>
-                               </div>
-                               <Badge className="bg-white border-indigo-300 text-indigo-700 text-[8px] font-bold">95% CONF</Badge>
-                            </div>
-                            <p className="text-xs font-bold text-slate-900 mb-1">RC: {caseData.ration_card}</p>
-                            <p className="text-[10px] text-indigo-800 font-medium">Synthetic Household: {caseData.member_count} members linked to one card.</p>
-                          </div>
-                        ))}
-
-                        {/* Operator Corruption Rules (F) */}
-                        {usrRulesEF.rule_f.slice(0, 10).map((caseData: any, i: number) => (
-                          <div 
-                            key={`f-${i}`} 
-                            onClick={() => fetchOperatorAudit(caseData.operator_id)}
-                            className="p-4 rounded-xl bg-rose-50 border border-rose-200 hover:border-rose-300 transition-all cursor-pointer group active:scale-95"
-                          >
-                            <div className="flex items-start justify-between mb-3">
-                               <div className="flex items-center gap-2">
-                                  <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                                  <span className="text-[10px] font-black uppercase tracking-[0.2em] text-rose-400">Rule F1</span>
-                               </div>
-                               <Badge className="bg-white border-rose-300 text-rose-700 text-[8px] font-bold">90% CONF</Badge>
-                            </div>
-                            <p className="text-xs font-bold text-slate-900 mb-1">Operator: {caseData.operator_id}</p>
-                            <div className="flex items-center justify-between">
-                              <p className="text-[10px] text-rose-700 font-medium">{Math.round(caseData.fraud_rate * 100)}% Forensic Fraud Rate.</p>
-                              <span className="text-[9px] font-black text-rose-400 uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-opacity">Drill Down →</span>
-                            </div>
-                          </div>
-                        ))}
-
-                        {intelligenceFeedCount === 0 && (
-                           <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center">
-                             <p className="text-[11px] font-semibold text-slate-700">No intelligence alerts available yet.</p>
-                             <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                               The feed fills after fraud-analysis endpoints return alerts from the graph. If you just opened the hub, give the heavier scans a few seconds to finish.
-                             </p>
-                           </div>
-                         )}
-                      </div>
-                    </ScrollArea>
-                   
-                   <div className="p-6 bg-slate-100 flex items-center justify-between border-t border-slate-200">
-                     <span className="text-[10px] font-bold uppercase tracking-widest text-slate-600">
-                       Showing {filteredIntelFeed.length.toLocaleString()} filtered alerts
-                     </span>
-                     <div className="flex items-center gap-2">
-                       {intelPage > 1 && (
-                         <Button
-                           size="sm"
-                           onClick={() => setIntelPage((p) => Math.max(1, p - 1))}
-                           className="h-8 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase px-4 rounded-xl"
-                         >
-                           Prev
-                         </Button>
-                       )}
-                       {intelPage < totalIntelPages && (
-                         <Button
-                           size="sm"
-                           onClick={() => setIntelPage((p) => Math.min(totalIntelPages, p + 1))}
-                           className="h-8 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase px-4 rounded-xl"
-                         >
-                           Next
-                         </Button>
-                       )}
-                       {usrIntelligenceFeed.length < usrIntelligenceTotal && (
-                         <Button
-                           size="sm"
-                           onClick={handleLoadMoreIntelligence}
-                           disabled={usrLoadingMoreIntel}
-                           className="h-8 bg-slate-700 hover:bg-slate-600 text-white text-[10px] font-black uppercase px-4 rounded-xl"
-                         >
-                           {usrLoadingMoreIntel ? 'Loading...' : 'Load More'}
-                         </Button>
-                       )}
-                       <Button size="sm" onClick={handleAuditAll} className="h-8 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-black uppercase px-4 rounded-xl">
-                         Audit All
-                       </Button>
-                     </div>
-                   </div>
-                </Card>
-
               </div>
             </div>
+
           </div>
-        </ScrollArea>
+        </div>
       </div>
 
       <Dialog open={intelExplainOpen} onOpenChange={setIntelExplainOpen}>
@@ -1479,6 +1844,3 @@ export const UsrDashboard: React.FC<UsrDashboardProps> = ({ API }) => {
     </TooltipProvider>
   )
 }
-
-
-

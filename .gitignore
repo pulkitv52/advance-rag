@@ -39,6 +39,7 @@ AGENTS.md
 
 # Large local data artifacts
 srsdb.dump
+srsadmin_only.dump
 *.sql
 srsdb_top10_all_tables.csv
 srsdb_top10_all_tables_by_table.xlsx
